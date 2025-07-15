@@ -3,6 +3,7 @@ import type { DriveItem } from "@microsoft/microsoft-graph-types";
 export type AutoInfoPositionFunction = boolean | ((album: DriveItem, target: DriveItem) => (number | string)[]) | null;
 export type Config = {
   albums: (string | RegExp)[];
+  folders?: (string | RegExp)[];
   updateInterval: number;
   sort: "new" | "old" | "random";
   condition: {
@@ -22,8 +23,12 @@ export type Config = {
   autoInfoPosition: AutoInfoPositionFunction;
 };
 
-export type ConfigTransformed = Omit<Config, "albums"> & {
+export type ConfigTransformed = Omit<Config, "albums" | "folders"> & {
   albums: (string | {
+    source: string,
+    flags: string,
+  })[];
+  folders?: (string | {
     source: string,
     flags: string,
   })[];

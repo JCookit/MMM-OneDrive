@@ -1,5 +1,20 @@
 # MMM-OneDrive Change Log
 
+**`[1.6.0] - 2025/07/15`**
+- 🎉 **Major Feature**: Added OneDrive folder support
+  - Now supports regular OneDrive folders in addition to albums
+  - Works with both personal OneDrive and OneDrive for Business
+  - Supports folder name matching and path-based access (e.g., "Photos/2024")
+  - Can mix albums and folders in the same configuration
+  - Added new `folders` configuration option
+  - Enhanced API endpoints for folder operations
+  - Added comprehensive folder caching and scanning
+  - Includes folder thumbnail support
+  - Full TypeScript type support for folder configuration
+- Enhanced: Location display improvements with zoom level optimization for better geocoding accuracy
+- Enhanced: State filtering for location display (US/Canada only, with city availability fallback)
+- Enhanced: English language support for OpenStreetMap geocoding API
+
 **`[1.5.3] - 2025/07/09`**
 - Fixed: module suspend (MMM-ModuleScheduler) not working
 

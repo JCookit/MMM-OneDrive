@@ -143,12 +143,32 @@ Module.register<Config>("MMM-OneDrive", {
       info.style.setProperty("--right", String(right));
     }
     info.innerHTML = "";
-    const albumCover = document.createElement("div");
-    albumCover.classList.add("albumCover");
-    albumCover.style.backgroundImage = `url(modules/MMM-OneDrive/cache/${album.id})`;
-    const albumTitle = document.createElement("div");
-    albumTitle.classList.add("albumTitle");
-    albumTitle.innerHTML = album.name;
+    
+    // Detect if this photo is from a folder vs an album
+    const isFromFolder = target._folderId && !album.bundle;
+    
+    let sourceIcon, sourceTitle;
+    
+    if (isFromFolder) {
+      // Create folder icon instead of album cover
+      sourceIcon = document.createElement("div");
+      sourceIcon.classList.add("folderIcon");
+      sourceIcon.innerHTML = "📁"; // Folder emoji icon
+      
+      sourceTitle = document.createElement("div");
+      sourceTitle.classList.add("folderTitle");
+      sourceTitle.innerHTML = album.name; // Folder name
+    } else {
+      // Create album cover (existing behavior)
+      sourceIcon = document.createElement("div");
+      sourceIcon.classList.add("albumCover");
+      sourceIcon.style.backgroundImage = `url(modules/MMM-OneDrive/cache/${album.id})`;
+      
+      sourceTitle = document.createElement("div");
+      sourceTitle.classList.add("albumTitle");
+      sourceTitle.innerHTML = album.name; // Album name
+    }
+    
     const photoTime = document.createElement("div");
     photoTime.classList.add("photoTime");
     photoTime.innerHTML = this.config.timeFormat === "relative" ? moment(target.mediaMetadata.dateTimeOriginal).fromNow() : moment(target.mediaMetadata.dateTimeOriginal).format(this.config.timeFormat);
@@ -179,8 +199,8 @@ Module.register<Config>("MMM-OneDrive", {
     const infoText = document.createElement("div");
     infoText.classList.add("infoText");
 
-    info.appendChild(albumCover);
-    infoText.appendChild(albumTitle);
+    info.appendChild(sourceIcon);
+    infoText.appendChild(sourceTitle);
     infoText.appendChild(photoTime);
     if (photoLocation.innerHTML) {
       infoText.appendChild(photoLocation);

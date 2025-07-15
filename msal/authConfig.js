@@ -36,6 +36,15 @@ const protectedResources = {
   listAllAlbums: {
     endpoint: `${GRAPH_ENDPOINT_HOST}v1.0/me/drive/bundles?filter=${encodeURIComponent("bundle/album ne null")}`,
   },
+  listAllFolders: {
+    endpoint: `${GRAPH_ENDPOINT_HOST}v1.0/me/drive/root/children?$filter=folder ne null`,
+  },
+  getFolderByPath: {
+    endpoint: `${GRAPH_ENDPOINT_HOST}v1.0/me/drive/root:/$$folderPath$$`,
+  },
+  getFolderChildren: {
+    endpoint: `${GRAPH_ENDPOINT_HOST}v1.0/me/drive/items/$$folderId$$/children`,
+  },
   getChildrenInAlbum: {
     endpoint: `${GRAPH_ENDPOINT_HOST}v1.0/me/drives/$$userId$$/items/$$albumId$$/children?$top=1000`,
   },

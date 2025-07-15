@@ -18,6 +18,7 @@ Display your photos from album of OneDrive on [MagicMirror²](https://github.com
   position: "top_right",
   config: {
     albums: [], // Set your album name. like ["My wedding", "family share", "Travle to Paris"]
+    folders: [], // NEW: Set your folder paths. like ["Photos/2024", "Camera Roll", "Screenshots"]
     updateInterval: 1000 * 60, // minimum 10 seconds.
     sort: "new", // "old", "random"
     condition: {
@@ -49,6 +50,25 @@ albums: ["My wedding", "family share", "Travle to Paris", "from Tom"],
 
 - Caution. Too many albums and photos could make long bootup delay.
 - Remember this. You can only show max 8640 photos in a day. Manage your album what to show, it will make better performance.
+
+### `folders` (NEW)
+
+You can now access photos from regular OneDrive folders in addition to albums. This works with both personal OneDrive and OneDrive for Business. You can specify folder names or paths:
+
+```js
+folders: [
+  "Photos/2024",           // Path-based access
+  "Camera Roll",           // Folder name matching
+  "Screenshots",           // Root-level folder
+  "Family Photos/Vacation" // Nested folder path
+],
+```
+
+**Folder vs Album differences:**
+- **Albums** are special OneDrive photo collections (bundles) - only available in personal OneDrive
+- **Folders** are regular file system folders - work with both personal OneDrive and OneDrive for Business
+- You can use both `albums` and `folders` together in the same configuration
+- Folder paths use forward slashes (`/`) regardless of your operating system
 
 ### `updateInterval`
 

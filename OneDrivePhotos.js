@@ -249,7 +249,7 @@ class OneDrivePhotos extends EventEmitter {
         this.log(`getImages loop cycle: ${loopCycle}`);
         const startTime = Date.now();
         try {
-          /** @type {import("@microsoft/microsoft-graph-client").PageCollection} */
+          /** @type {import("@microsoft-graph-client").PageCollection} */
           const response = await this.request("getImages", pageUrl, "get");
           if (Array.isArray(response.value)) {
             /** @type {microsoftgraph.DriveItem[]} */
@@ -373,6 +373,143 @@ class OneDrivePhotos extends EventEmitter {
   }
 
   /**
+   * Get images from a specific folder with filtering and metadata
+   * @param {string} folderId
+   * @param {function} isValid
+   * @param {number} maxNum
+   * @returns {Promise<OneDriveMediaItem[]>}
+   */
+  async getImageFromFolder(folderId, isValid = null, maxNum = 99999) {
+    await this.onAuthReady();
+    const url = protectedResources.getFolderChildren.endpoint.replace("$$folderId$$", folderId);
+
+    this.log("Indexing photos. folder:", folderId);
+    /**
+     * @type {OneDriveMediaItem[]}
+     */
+    const list = [];
+    let loopCycle = 0;
+    /**
+     * Single-loop version of getImages for folders
+     * @param {string} startUrl
+     * @returns {Promise<OneDriveMediaItem[]>}
+     */
+    const getImages = async (startUrl) => {
+      let pageUrl = startUrl;
+      let done = false;
+      while (!done) {
+        this.log(`getImages loop cycle: ${loopCycle}`);
+        const startTime = Date.now();
+        try {
+          /** @type {import("@microsoft-graph-client").PageCollection} */
+          const response = await this.request("getImages", pageUrl, "get");
+          if (Array.isArray(response.value)) {
+            /** @type {microsoftgraph.DriveItem[]} */
+            const childrenItems = response.value.filter(item => {
+              // Filter for image files only
+              return item.file && item.image && 
+                     (item.file.mimeType?.startsWith('image/') || 
+                      /\.(jpg|jpeg|png|gif|bmp|webp|tiff|svg)$/i.test(item.name));
+            });
+            this.log(`Parsing ${childrenItems.length} items in folder ${folderId}`);
+            let validCount = 0;
+            for (const item of childrenItems) {
+              /** @type {OneDriveMediaItem} */
+              const itemVal = {
+                id: item.id,
+                _folderId: folderId,
+                mimeType: item.file?.mimeType || "",
+                baseUrl: item["@microsoft.graph.downloadUrl"],
+                baseUrlExpireDateTime: generateNewExpirationDate(),
+                filename: item.name,
+                mediaMetadata: {
+                  dateTimeOriginal:
+                    item.photo?.takenDateTime ||
+                    item.fileSystemInfo?.createdDateTime ||
+                    item.fileSystemInfo?.lastModifiedDateTime,
+                },
+                parentReference: item.parentReference,
+              };
+              if (list.length < maxNum) {
+                if (item.image) {
+                  itemVal.mediaMetadata.width = item.image.width;
+                  itemVal.mediaMetadata.height = item.image.height;
+                }
+                if (item.photo) {
+                  itemVal.mediaMetadata.photo = {
+                    cameraMake: item.photo.cameraMake,
+                    cameraModel: item.photo.cameraModel,
+                    focalLength: item.photo.focalLength,
+                    apertureFNumber: item.photo.fNumber,
+                    isoEquivalent: item.photo.iso,
+                    exposureTime:
+                      item.photo.exposureNumerator &&
+                        item.photo.exposureDenominator &&
+                        item.photo.exposureDenominator !== 0
+                        ? (
+                          (item.photo.exposureNumerator * 1.0) /
+                          item.photo.exposureDenominator
+                        ).toFixed(2) + "s"
+                        : null,
+                  };
+                }
+                if (item.video) {
+                  itemVal.mediaMetadata.width = item.video.width;
+                  itemVal.mediaMetadata.height = item.video.height;
+                  itemVal.mediaMetadata.video = item.video;
+                }
+                // Add location information if available (coordinates only, geocoding done later)
+                if (item.location && item.location.latitude && item.location.longitude) {
+                  itemVal.mediaMetadata.location = {
+                    latitude: item.location.latitude,
+                    longitude: item.location.longitude,
+                    altitude: item.location.altitude,
+                  };
+                }
+
+                if (typeof isValid === "function") {
+                  if (isValid(itemVal)) {
+                    list.push(itemVal);
+                    validCount++;
+                  }
+                } else {
+                  list.push(itemVal);
+                  validCount++;
+                }
+              }
+            }
+            this.logDebug(`Valid ${validCount} items in folder ${folderId}`);
+            const endTime = Date.now();
+            this.logDebug(`getImages loop cycle ${loopCycle} took ${endTime - startTime} ms`);
+            if (list.length >= maxNum) {
+              this.log("Indexing photos done, found: ", list.length);
+              done = true;
+              return list;
+            } else if (response["@odata.nextLink"]) {
+              this.logDebug(`Got nextLink, continue to get more images from folder: ${folderId}`);
+              pageUrl = response["@odata.nextLink"];
+              loopCycle++;
+              await sleep(500);
+            } else {
+              done = true;
+              return list;
+            }
+          } else {
+            this.logWarn(`No items found in folder: ${folderId}`);
+            done = true;
+            return list;
+          }
+        } catch (err) {
+          this.logError(".getImageFromFolder()", err.toString());
+          this.logError(err);
+          throw err;
+        }
+      }
+    };
+    return await getImages(url);
+  }
+
+  /**
    *
    * @param {OneDriveMediaItem[]} items
    * @returns {Promise<OneDriveMediaItem[]>} items
@@ -453,6 +590,143 @@ class OneDrivePhotos extends EventEmitter {
       this.logError("Error in refreshItem", { id: item.id, filename: item.filename });
       this.logError(error_to_string(err));
     }
+  }
+
+  async getFolders() {
+    const folders = await this.getFolderLoop();
+    return folders;
+  }
+
+  async getFolderLoop() {
+    await this.onAuthReady();
+    const url = protectedResources.listAllFolders.endpoint;
+    /** @type {microsoftgraph.DriveItem[]} */
+    let list = [];
+    let found = 0;
+    /**
+     *
+     * @param {string} pageUrl
+     * @returns {Promise<microsoftgraph.DriveItem[]>} DriveItem
+     */
+    const getFolder = async (pageUrl) => {
+      this.log("Getting Folder info chunks.");
+      try {
+        /** @type {import("@microsoft/microsoft-graph-client").PageCollection} */
+        const response = await this.request("getFolder", pageUrl, "get", null);
+        if (Array.isArray(response.value)) {
+          /** @type {microsoftgraph.DriveItem[]} */
+          const arrayValue = response.value;
+          this.logDebug("found folder:");
+          this.logDebug("name\t\tid");
+          arrayValue.map(f => `${f.name}\t${f.id}`).forEach(s => this.logDebug(s));
+          found += arrayValue.length;
+          list = list.concat(arrayValue);
+        }
+        if (response["@odata.nextLink"]) {
+          await sleep(500);
+          return await getFolder(response["@odata.nextLink"]);
+        } else {
+          this.logDebug("founded folders: ", found);
+          return list;
+        }
+      } catch (err) {
+        this.logError(`Error in getFolder() ${err.toString()}`);
+        this.logError(err.toString());
+        throw err;
+      }
+    };
+    return await getFolder(url);
+  }
+
+  /**
+   * Get folder by path (e.g., "Photos/2024" or "Camera Roll")
+   * @param {string} folderPath
+   * @returns {Promise<microsoftgraph.DriveItem | null>}
+   */
+  async getFolderByPath(folderPath) {
+    await this.onAuthReady();
+    try {
+      const url = protectedResources.getFolderByPath.endpoint.replace("$$folderPath$$", encodeURIComponent(folderPath));
+      const response = await this.request("getFolderByPath", url, "get", null);
+      return response;
+    } catch (err) {
+      this.logError(`Error getting folder by path '${folderPath}':`, err.toString());
+      return null;
+    }
+  }
+
+  /**
+   *
+   * @param {microsoftgraph.DriveItem} folder
+   * @returns {Promise<string | null>}
+   */
+  async getFolderThumbnail(folder) {
+    // For folders, we'll try to get a thumbnail from the first image in the folder
+    try {
+      const children = await this.getFolderPhotos(folder.id);
+      if (children && children.length > 0) {
+        const firstPhoto = children[0];
+        if (firstPhoto.thumbnails && firstPhoto.thumbnails.length > 0) {
+          const thumbnail = firstPhoto.thumbnails[0];
+          return thumbnail.mediumSquare?.url || thumbnail.medium?.url || null;
+        }
+      }
+      return null;
+    } catch (err) {
+      this.logError("Error in getFolderThumbnail(), ignore", err);
+      return null;
+    }
+  }
+
+  /**
+   * Get photos from a specific folder
+   * @param {string} folderId
+   * @returns {Promise<microsoftgraph.DriveItem[]>}
+   */
+  async getFolderPhotos(folderId) {
+    await this.onAuthReady();
+    const url = protectedResources.getFolderChildren.endpoint.replace("$$folderId$$", folderId);
+    /** @type {microsoftgraph.DriveItem[]} */
+    let list = [];
+    let found = 0;
+    /**
+     *
+     * @param {string} pageUrl
+     * @returns {Promise<microsoftgraph.DriveItem[]>} DriveItem
+     */
+    const getFolderItems = async (pageUrl) => {
+      this.log("Getting Folder photos chunks.");
+      try {
+        /** @type {import("@microsoft-graph-client").PageCollection} */
+        const response = await this.request("getFolderPhotos", pageUrl, "get", null);
+        if (Array.isArray(response.value)) {
+          /** @type {microsoftgraph.DriveItem[]} */
+          const arrayValue = response.value.filter(item => {
+            // Filter for image files only
+            return item.file && item.image && 
+                   (item.file.mimeType?.startsWith('image/') || 
+                    /\.(jpg|jpeg|png|gif|bmp|webp|tiff|svg)$/i.test(item.name));
+          });
+          this.logDebug("found folder photos:");
+          this.logDebug("name\t\tid");
+          arrayValue.map(p => `${p.name}\t${p.id}`).forEach(s => this.logDebug(s));
+          found += arrayValue.length;
+          list = list.concat(arrayValue);
+        }
+        if (response["@odata.nextLink"]) {
+          await sleep(500);
+          return await getFolderItems(response["@odata.nextLink"]);
+        } else {
+          this.logDebug("founded folder photos: ", found);
+          return list;
+        }
+      } catch (err) {
+        this.logError(`Error in getFolderPhotos() ${err.toString()}`);
+        this.logError(err.toString());
+        throw err;
+      }
+    };
+    return await getFolderItems(url);
   }
 }
 

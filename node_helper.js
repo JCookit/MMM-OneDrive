@@ -100,12 +100,15 @@ const nodeHelperObject = {
     this.scanTimer = null;
     /** @type {microsoftgraph.DriveItem} */
     this.selectedAlbums = [];
+    /** @type {microsoftgraph.DriveItem} */
+    this.selectedFolders = [];
     this.localPhotoList = [];
     this.photoRefreshPointer = 0;
     this.queue = null;
     this.initializeTimer = null;
 
     this.CACHE_ALBUMNS_PATH = path.resolve(this.path, "cache", "selectedAlbumsCache.json");
+    this.CACHE_FOLDERS_PATH = path.resolve(this.path, "cache", "selectedFoldersCache.json");
     this.CACHE_PHOTOLIST_PATH = path.resolve(this.path, "cache", "photoListCache.json");
     this.CACHE_CONFIG = path.resolve(this.path, "cache", "config.json");
     this.log_info("Started");
@@ -191,6 +194,17 @@ const nodeHelperObject = {
       }
     }
 
+    this.foldersFilters = [];
+    if (config.folders && Array.isArray(config.folders)) {
+      for (const folder of config.folders) {
+        if (folder.hasOwnProperty("source") && folder.hasOwnProperty("flags")) {
+          this.foldersFilters.push(new RE2(folder.source, folder.flags + "u"));
+        } else {
+          this.foldersFilters.push(folder);
+        }
+      }
+    }
+
     this.startUIRenderClock();
     await this.tryToIntitialize();
   },
@@ -260,8 +274,25 @@ const nodeHelperObject = {
         this.log_error("unable to load selectedAlbums cache", err);
       }
     }
-    if (!Array.isArray(this.selectedAlbums) || this.selectedAlbums.length === 0) {
-      this.log_warn("No valid albums found. Skipping photo loading.");
+
+    //load cached folder list - if available
+    const cacheFolderDt = new Date(await this.readCacheConfig("CACHE_FOLDERS_PATH"));
+    const notExpiredCacheFolder = cacheFolderDt && (Date.now() - cacheFolderDt.getTime() < ONE_DAY);
+    this.log_debug("notExpiredCacheFolder", { cacheFolderDt, notExpiredCacheFolder });
+    if (notExpiredCacheFolder && fs.existsSync(this.CACHE_FOLDERS_PATH)) {
+      this.log_info("Loading cached folders list");
+      try {
+        const data = await readFile(this.CACHE_FOLDERS_PATH, "utf-8");
+        this.selectedFolders = JSON.parse(data.toString());
+        this.log_debug("successfully loaded selectedFolders");
+      } catch (err) {
+        this.log_error("unable to load selectedFolders cache", err);
+      }
+    }
+
+    if ((!Array.isArray(this.selectedAlbums) || this.selectedAlbums.length === 0) &&
+        (!Array.isArray(this.selectedFolders) || this.selectedFolders.length === 0)) {
+      this.log_warn("No valid albums or folders found. Skipping photo loading.");
       return false;
     }
 
@@ -304,6 +335,29 @@ const nodeHelperObject = {
       return r;
     } catch (err) {
       this.log_error(error_to_string(err));
+      throw err;
+    }
+  },
+
+  /** @returns {Promise<microsoftgraph.DriveItem[]>} folders */
+  getFolders: async function () {
+    try {
+      const r = await oneDrivePhotosInstance.getFolders();
+      return r;
+    } catch (err) {
+      this.log_error(error_to_string(err));
+      throw err;
+    }
+  },
+
+  /** @returns {Promise<microsoftgraph.DriveItem | null>} folder */
+  getFolderByPath: async function (folderPath) {
+    try {
+      const r = await oneDrivePhotosInstance.getFolderByPath(folderPath);
+      return r;
+    } catch (err) {
+      this.log_error(error_to_string(err));
+      return null;
     }
   },
 
@@ -348,13 +402,14 @@ const nodeHelperObject = {
   scanJob: async function () {
     this.queue = null;
     await this.getAlbumList();
+    await this.getFolderList();
     try {
-      if (this.selectedAlbums.length > 0) {
+      if (this.selectedAlbums.length > 0 || this.selectedFolders.length > 0) {
         await this.getImageList();
         this.savePhotoListCache();
         return true;
       } else {
-        this.log_warn("There is no album to get photos.");
+        this.log_warn("There is no album or folder to get photos.");
         return false;
       }
     } catch (err) {
@@ -394,24 +449,66 @@ const nodeHelperObject = {
       }
     }
     this.log_info("Finish Album scanning. Properly scanned :", selectedAlbums.length);
-    this.log_info("Albums:", selectedAlbums.map((a) => a.name).join(", "));
-
-    this.writeFileSafe(this.CACHE_ALBUMNS_PATH, JSON.stringify(selectedAlbums, null, 4), "Album list cache");
-    this.saveCacheConfig("CACHE_ALBUMNS_PATH", new Date().toISOString());
-
-    for (const a of selectedAlbums) {
-      const url = await oneDrivePhotosInstance.getAlbumThumbnail(a);
-      if (url) {
-        const fpath = path.join(this.path, "cache", a.id);
-        const file = fs.createWriteStream(fpath);
-        const response = await fetch(url);
-        await finished(Readable.fromWeb(response.body).pipe(file));
-      }
-    }
     this.selectedAlbums = selectedAlbums;
-    this.log_info("getAlbumList done");
+    await this.saveAlbumListCache();
   },
 
+  getFolderList: async function () {
+    // Skip folder scanning if no folders are configured
+    if (!this.foldersFilters || this.foldersFilters.length === 0) {
+      this.selectedFolders = [];
+      return;
+    }
+
+    this.log_info("Getting folder list");
+    /**
+     * @type {microsoftgraph.DriveItem[]} 
+     */
+    const folders = await this.getFolders();
+    /** 
+     * @type {microsoftgraph.DriveItem[]} 
+     */
+    const selectedFolders = [];
+    
+    for (const tf of this.foldersFilters) {
+      // Check if this is a path-based filter (contains '/')
+      if (typeof tf === 'string' && tf.includes('/')) {
+        // Handle folder path like "Photos/2024"
+        const folderItem = await this.getFolderByPath(tf);
+        if (folderItem) {
+          selectedFolders.push(folderItem);
+        } else {
+          this.log_warn(`Can't find folder path "${tf}" in your OneDrive.`);
+        }
+      } else {
+        // Handle folder name matching (like album matching)
+        const matches = folders.filter((f) => {
+          if (tf instanceof RE2) {
+            this.log_debug(`RE2 match ${tf.source} -> '${f.name}' : ${tf.test(f.name)}`);
+            return tf.test(f.name);
+          } else {
+            return tf === f.name;
+          }
+        });
+        if (matches.length === 0) {
+          this.log_warn(`Can't find "${tf instanceof RE2
+            ? tf.source
+            : tf}" in your folder list.`);
+        } else {
+          for (const match of matches) {
+            if (!selectedFolders.some(f => f.id === match.id)) {
+              selectedFolders.push(match);
+            }
+          }
+        }
+      }
+    }
+    this.log_info("Finish Folder scanning. Properly scanned :", selectedFolders.length);
+    this.selectedFolders = selectedFolders;
+    await this.saveFolderListCache();
+  },
+
+  /** @returns {Promise<microsoftgraph.DriveItem[]>} image */
   getImageList: async function () {
     this.log_info("Getting image list");
     const condition = this.config.condition;
@@ -446,6 +543,19 @@ const nodeHelperObject = {
         this.log_info(`Got ${list.length} photo(s) from '${album.name}'`);
         photos.push(...list);
       }
+
+      // Process folders
+      for (const folder of this.selectedFolders) {
+        this.log_info(`Prepare to get photo list from folder '${folder.name}'`);
+        const list = await oneDrivePhotosInstance.getImageFromFolder(folder.id, photoCondition);
+        list.forEach((i) => {
+          i._folderTitle = folder.name;
+          i._folderId = folder.id;
+        });
+        this.log_info(`Got ${list.length} photo(s) from folder '${folder.name}'`);
+        photos.push(...list);
+      }
+
       if (photos.length > 0) {
         if (this.config.sort === "new" || this.config.sort === "old") {
           photos.sort((a, b) => {
@@ -535,11 +645,15 @@ const nodeHelperObject = {
       }
 
       const album = this.selectedAlbums.find((a) => a.id === photo._albumId);
+      const folder = this.selectedFolders.find((f) => f.id === photo._folderId);
+      
+      // Determine the source (album or folder) for display
+      const source = album || folder;
 
       const base64 = buffer.toString("base64");
 
       this.log_debug("Image send to UI:", { id: photo.id, filename: photo.filename, index: photo._indexOfPhotos });
-      this.sendSocketNotification("RENDER_PHOTO", { photoBase64: base64, photo, album, info: null, errorMessage: null });
+      this.sendSocketNotification("RENDER_PHOTO", { photoBase64: base64, photo, album: source, info: null, errorMessage: null });
     } catch (err) {
       if (err instanceof FetchHTTPError) {
         // silently skip the error
@@ -565,6 +679,20 @@ const nodeHelperObject = {
     (async () => {
       await this.writeFileSafe(this.CACHE_PHOTOLIST_PATH, JSON.stringify(this.localPhotoList, null, 4), "Photo list cache");
       await this.saveCacheConfig("CACHE_PHOTOLIST_PATH", new Date().toISOString());
+    })();
+  },
+
+  saveAlbumListCache: function () {
+    (async () => {
+      await this.writeFileSafe(this.CACHE_ALBUMNS_PATH, JSON.stringify(this.selectedAlbums, null, 4), "Album list cache");
+      await this.saveCacheConfig("CACHE_ALBUMNS_PATH", new Date().toISOString());
+    })();
+  },
+
+  saveFolderListCache: function () {
+    (async () => {
+      await this.writeFileSafe(this.CACHE_FOLDERS_PATH, JSON.stringify(this.selectedFolders, null, 4), "Folder list cache");
+      await this.saveCacheConfig("CACHE_FOLDERS_PATH", new Date().toISOString());
     })();
   },
 

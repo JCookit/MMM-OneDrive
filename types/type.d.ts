@@ -35,5 +35,6 @@ export interface OneDriveMediaItem {
   filename: string;
   _albumId: string;
   _albumTitle: string;
+  _folderId?: string;  // Present when photo comes from a folder
   _indexOfPhotos: number;
 }
