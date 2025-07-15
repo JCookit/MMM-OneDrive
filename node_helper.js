@@ -30,13 +30,14 @@ const { createIntervalRunner } = require("./src/interval-runner");
  */
 const reverseGeocode = async (latitude, longitude) => {
   try {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1`;
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1&accept-language=en`;
     const https = require('https');
     
     return new Promise((resolve, reject) => {
       const options = {
         headers: {
-          'User-Agent': 'MMM-OneDrive/1.0 (https://github.com/hermanho/MMM-OneDrive)'
+          'User-Agent': 'MMM-OneDrive/1.0 (https://github.com/hermanho/MMM-OneDrive)',
+          'Accept-Language': 'en'
         }
       };
       
