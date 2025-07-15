@@ -30,7 +30,7 @@ const { createIntervalRunner } = require("./src/interval-runner");
  */
 const reverseGeocode = async (latitude, longitude) => {
   try {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1&accept-language=en`;
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=16&addressdetails=1&accept-language=en`;
     const https = require('https');
     
     return new Promise((resolve, reject) => {
@@ -53,7 +53,7 @@ const reverseGeocode = async (latitude, longitude) => {
             const json = JSON.parse(data);
             const address = json.address;
             resolve({
-              city: address?.city || address?.town || address?.village || address?.hamlet,
+              city: address?.city || address?.town || address?.village || address?.hamlet || address?.county,
               state: address?.state,
               country: address?.country
             });
