@@ -159,8 +159,18 @@ Module.register<Config>("MMM-OneDrive", {
     if (target.mediaMetadata.location) {
       const location = target.mediaMetadata.location;
       if (location.city || location.state || location.country) {
-        const locationParts = [location.city, location.state, location.country].filter(Boolean);
-        photoLocation.innerHTML = locationParts.join(", ");
+        const locationParts = [location.city];
+        
+        // Include state if: (US or Canada) OR (no city available)
+        if (location.state && ((location.country?.toLowerCase() === "united states" || location.country?.toLowerCase() === "canada") || !location.city)) {
+          locationParts.push(location.state);
+        }
+        
+        if (location.country) {
+          locationParts.push(location.country);
+        }
+        
+        photoLocation.innerHTML = locationParts.filter(Boolean).join(", ");
       } else if (location.latitude && location.longitude) {
         photoLocation.innerHTML = `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`;
       }

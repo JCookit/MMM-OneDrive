@@ -71,8 +71,8 @@
 }
 
 #ONEDRIVE_PHOTO_INFO .albumCover {
-  width: 48px;
-  height: 48px;
+  width: 60px;
+  height: 60px;
   border-radius: 50%;
   background-size: cover;
   background-repeat: no-repeat;
@@ -90,8 +90,6 @@
 
 #ONEDRIVE_PHOTO_INFO .photoLocation {
   color: #fdf;
-  font-size: 16px;
-  margin-top: 2px;
 }
 
 #ONEDRIVE_PHOTO_INFO .infoText {
