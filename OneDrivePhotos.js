@@ -24,6 +24,61 @@ const chunk = (arr, size) =>
 
 const generateNewExpirationDate = () => new Date(Date.now() + 55 * 60 * 1000).toISOString();
 
+/**
+ * Simple reverse geocoding using OpenStreetMap Nominatim API
+ * @param {number} latitude
+ * @param {number} longitude
+ * @returns {Promise<{city?: string, country?: string}>}
+ */
+const reverseGeocode = async (latitude, longitude) => {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1`;
+    const https = require('https');
+    
+    return new Promise((resolve, reject) => {
+      const options = {
+        headers: {
+          'User-Agent': 'MMM-OneDrive/1.0 (https://github.com/hermanho/MMM-OneDrive)'
+        }
+      };
+      
+      const req = https.get(url, options, (res) => {
+        let data = '';
+        
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(data);
+            const address = json.address;
+            resolve({
+              city: address?.city || address?.town || address?.village || address?.hamlet,
+              state: address?.state,
+              country: address?.country
+            });
+          } catch (error) {
+            resolve({});
+          }
+        });
+      });
+      
+      req.on('error', (error) => {
+        resolve({});
+      });
+      
+      req.setTimeout(5000, () => {
+        req.destroy();
+        resolve({});
+      });
+    });
+  } catch (error) {
+    console.error('Reverse geocoding failed:', error);
+    return {};
+  }
+};
+
 class Auth extends EventEmitter {
   #debug = {};
   /** @type {AuthProvider} */
@@ -152,8 +207,8 @@ class OneDrivePhotos extends EventEmitter {
     let list = [];
     let found = 0;
     /**
-     * 
-     * @param {string} pageUrl 
+     *
+     * @param {string} pageUrl
      * @returns {Promise<microsoftgraph.DriveItem[]>} DriveItem
      */
     const getAlbum = async (pageUrl) => {
@@ -187,8 +242,8 @@ class OneDrivePhotos extends EventEmitter {
   }
 
   /**
-   * 
-   * @param {microsoftgraph.DriveItem} album 
+   *
+   * @param {microsoftgraph.DriveItem} album
    * @returns {Promise<string | null>}
    */
   async getAlbumThumbnail(album) {
@@ -300,6 +355,26 @@ class OneDrivePhotos extends EventEmitter {
                   itemVal.mediaMetadata.width = item.video.width;
                   itemVal.mediaMetadata.height = item.video.height;
                   itemVal.mediaMetadata.video = item.video;
+                }
+                // Add location information if available
+                if (item.location && item.location.latitude && item.location.longitude) {
+                  itemVal.mediaMetadata.location = {
+                    latitude: item.location.latitude,
+                    longitude: item.location.longitude,
+                    altitude: item.location.altitude,
+                  };
+                  
+                  // Get city/country from coordinates using reverse geocoding
+                  try {
+                    const locationInfo = await reverseGeocode(item.location.latitude, item.location.longitude);
+                    if (locationInfo.city || locationInfo.state || locationInfo.country) {
+                      itemVal.mediaMetadata.location.city = locationInfo.city;
+                      itemVal.mediaMetadata.location.state = locationInfo.state;
+                      itemVal.mediaMetadata.location.country = locationInfo.country;
+                    }
+                  } catch (error) {
+                    this.logDebug('Failed to reverse geocode location:', error);
+                  }
                 }
 
                 // It looks very slow to download the image and get EXIF data...

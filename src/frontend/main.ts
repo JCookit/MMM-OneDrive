@@ -152,12 +152,29 @@ Module.register<Config>("MMM-OneDrive", {
     const photoTime = document.createElement("div");
     photoTime.classList.add("photoTime");
     photoTime.innerHTML = this.config.timeFormat === "relative" ? moment(target.mediaMetadata.dateTimeOriginal).fromNow() : moment(target.mediaMetadata.dateTimeOriginal).format(this.config.timeFormat);
+    
+    // Add location info if available
+    const photoLocation = document.createElement("div");
+    photoLocation.classList.add("photoLocation");
+    if (target.mediaMetadata.location) {
+      const location = target.mediaMetadata.location;
+      if (location.city || location.state || location.country) {
+        const locationParts = [location.city, location.state, location.country].filter(Boolean);
+        photoLocation.innerHTML = locationParts.join(", ");
+      } else if (location.latitude && location.longitude) {
+        photoLocation.innerHTML = `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`;
+      }
+    }
+    
     const infoText = document.createElement("div");
     infoText.classList.add("infoText");
 
     info.appendChild(albumCover);
     infoText.appendChild(albumTitle);
     infoText.appendChild(photoTime);
+    if (photoLocation.innerHTML) {
+      infoText.appendChild(photoLocation);
+    }
     info.appendChild(infoText);
     console.debug("[MMM-OneDrive] render image done",
       JSON.stringify({

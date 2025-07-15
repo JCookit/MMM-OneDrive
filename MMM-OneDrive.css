@@ -88,6 +88,12 @@
   color: #dfd;
 }
 
+#ONEDRIVE_PHOTO_INFO .photoLocation {
+  color: #fdf;
+  font-size: 16px;
+  margin-top: 2px;
+}
+
 #ONEDRIVE_PHOTO_INFO .infoText {
   float: right;
   margin-left: 12px;

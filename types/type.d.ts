@@ -8,6 +8,14 @@ export interface OneDriveMediaItem {
     manualExtractEXIF: boolean | null;
     width: string;
     height: string;
+    location?: {
+      latitude: number;
+      longitude: number;
+      altitude?: number;
+      city?: string;
+      state?: string;
+      country?: string;
+    };
     photo: {
       cameraMake?: string;
       cameraModel?: string;
