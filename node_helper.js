@@ -22,6 +22,61 @@ const { convertHEIC } = require("./photosConverter-node");
 const { fetchToUint8Array, FetchHTTPError } = require("./fetchItem-node");
 const { createIntervalRunner } = require("./src/interval-runner");
 
+/**
+ * Simple reverse geocoding using OpenStreetMap Nominatim API
+ * @param {number} latitude
+ * @param {number} longitude
+ * @returns {Promise<{city?: string, state?: string, country?: string}>}
+ */
+const reverseGeocode = async (latitude, longitude) => {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1`;
+    const https = require('https');
+    
+    return new Promise((resolve, reject) => {
+      const options = {
+        headers: {
+          'User-Agent': 'MMM-OneDrive/1.0 (https://github.com/hermanho/MMM-OneDrive)'
+        }
+      };
+      
+      const req = https.get(url, options, (res) => {
+        let data = '';
+        
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(data);
+            const address = json.address;
+            resolve({
+              city: address?.city || address?.town || address?.village || address?.hamlet,
+              state: address?.state,
+              country: address?.country
+            });
+          } catch (error) {
+            resolve({});
+          }
+        });
+      });
+      
+      req.on('error', (error) => {
+        resolve({});
+      });
+      
+      req.setTimeout(5000, () => {
+        req.destroy();
+        resolve({});
+      });
+    });
+  } catch (error) {
+    console.error('Reverse geocoding failed:', error);
+    return {};
+  }
+};
+
 const ONE_DAY = 24 * 60 * 60 * 1000; // 1 day in milliseconds
 const DEFAULT_SCAN_INTERVAL = 1000 * 60 * 55;
 const MINIMUM_SCAN_INTERVAL = 1000 * 60 * 10;
@@ -436,6 +491,31 @@ const nodeHelperObject = {
         photo.baseUrl = p.baseUrl;
         photo.baseUrlExpireDateTime = p.baseUrlExpireDateTime;
         this.log_info(`Image ${photo.filename} url refreshed new baseUrlExpireDateTime: ${photo.baseUrlExpireDateTime}`);
+      }
+    }
+
+    // Do reverse geocoding if location exists but doesn't have city/state/country yet
+    if (photo.mediaMetadata?.location && 
+        photo.mediaMetadata.location.latitude && 
+        photo.mediaMetadata.location.longitude &&
+        !photo.mediaMetadata.location.city && 
+        !photo.mediaMetadata.location.state && 
+        !photo.mediaMetadata.location.country) {
+      
+      this.log_debug(`Reverse geocoding location for ${photo.filename}`);
+      try {
+        const locationInfo = await reverseGeocode(
+          photo.mediaMetadata.location.latitude, 
+          photo.mediaMetadata.location.longitude
+        );
+        if (locationInfo.city || locationInfo.state || locationInfo.country) {
+          photo.mediaMetadata.location.city = locationInfo.city;
+          photo.mediaMetadata.location.state = locationInfo.state;
+          photo.mediaMetadata.location.country = locationInfo.country;
+          this.log_debug(`Geocoded location: ${[locationInfo.city, locationInfo.state, locationInfo.country].filter(Boolean).join(', ')}`);
+        }
+      } catch (error) {
+        this.log_debug('Failed to reverse geocode location:', error);
       }
     }
 
