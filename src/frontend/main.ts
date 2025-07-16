@@ -153,7 +153,7 @@ Module.register<Config>("MMM-OneDrive", {
       // Create folder icon instead of album cover
       sourceIcon = document.createElement("div");
       sourceIcon.classList.add("folderIcon");
-      sourceIcon.innerHTML = "📁"; // Folder emoji icon
+      sourceIcon.innerHTML = ""; // Empty - icon created with CSS
       
       sourceTitle = document.createElement("div");
       sourceTitle.classList.add("folderTitle");

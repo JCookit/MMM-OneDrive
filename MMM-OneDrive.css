@@ -91,6 +91,29 @@
   justify-content: center;
   font-size: 28px;
   color: #fd8;
+  position: relative;
+}
+
+/* Create a folder icon using pure CSS */
+#ONEDRIVE_PHOTO_INFO .folderIcon::before {
+  content: "";
+  position: absolute;
+  width: 24px;
+  height: 18px;
+  border: 2px solid #fd8;
+  border-radius: 2px;
+  background-color: #fd8;
+}
+
+#ONEDRIVE_PHOTO_INFO .folderIcon::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 5px;
+  background-color: #fd8;
+  top: 16px;
+  left: 16px;
+  border-radius: 1px 1px 0 0;
 }
 
 #ONEDRIVE_PHOTO_INFO .albumTitle {

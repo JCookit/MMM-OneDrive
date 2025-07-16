@@ -35,6 +35,7 @@ const foldersOnlyConfig = {
     ],
     updateInterval: 1000 * 60,
     sort: "random",
+    timeFormat: "YYYY/MM/DD",  // Show just the date, no time
     condition: {
       minWidth: 800,  // Only show high-resolution images
       minHeight: 600,
@@ -109,4 +110,16 @@ module.exports = {
  * - No manual album creation needed
  * - Supports nested folder structures
  * - Can access existing folder hierarchies
+ * 
+ * TIME FORMAT OPTIONS:
+ * - "YYYY/MM/DD HH:mm" - Full date and time (default)
+ * - "YYYY/MM/DD" - Date only (recommended to avoid timezone confusion)
+ * - "MMMM D, YYYY" - Full month name (e.g., "July 15, 2025")
+ * - "MMM DD, YYYY" - Short month name (e.g., "Jul 15, 2025") 
+ * - "L" - Locale-specific date format
+ * - "relative" - Relative time (e.g., "2 days ago")
+ * 
+ * NOTE: Timezone conversion is not recommended because most camera EXIF data
+ * does not include timezone information. Converting timestamps would likely
+ * produce incorrect results more often than correct ones.
  */
