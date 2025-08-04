@@ -451,6 +451,17 @@ const nodeHelperObject = {
     this.log_info("Finish Album scanning. Properly scanned :", selectedAlbums.length);
     this.selectedAlbums = selectedAlbums;
     await this.saveAlbumListCache();
+
+    for (const a of selectedAlbums) {
+      const url = await oneDrivePhotosInstance.getAlbumThumbnail(a);
+      if (url) {
+        const fpath = path.join(this.path, "cache", a.id);
+        const file = fs.createWriteStream(fpath);
+        const response = await fetch(url);
+        await finished(Readable.fromWeb(response.body).pipe(file));
+      }
+    }
+    this.selectedAlbums = selectedAlbums;
   },
 
   getFolderList: async function () {
