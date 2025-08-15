@@ -30,6 +30,15 @@ Module.register<Config>("MMM-OneDrive", {
     timeFormat: "YYYY/MM/DD HH:mm",
     autoInfoPosition: false,
     forceAuthInteractive: false,
+    leftMargin: null, // e.g. "25vw" or "400px" - leaves space for left sidebar modules
+    kenBurnsEffect: true, // Enable Ken Burns crop-and-zoom effect by default
+    faceDetection: {
+      enabled: true, // Enable face detection for Ken Burns focal points
+      minFaceSize: 50, // Minimum face size in pixels
+      maxFaceSize: 300, // Maximum face size in pixels  
+      confidenceThreshold: 0.5, // Detection confidence threshold (0-1)
+      debugMode: false, // Save debug images with face detection rectangles
+    },
   },
   requiresVersion: "2.24.0",
 
@@ -91,14 +100,17 @@ Module.register<Config>("MMM-OneDrive", {
       info.innerHTML = String(payload);
     }
     if (noti === "RENDER_PHOTO") {
-      this.state = {
-        type: "newPhoto",
-        payload,
-      };
-      const { photo, photoBase64, album } = payload;
-      const mimeType = photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType;
-      const url = `data:${mimeType};base64,${photoBase64}`;
-      this.render(url, photo, album);
+      this.state = { type: "newPhoto", payload };
+      const { photo, photoBase64, album, faceDetectionResult } = payload;
+      const url = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${photoBase64}`;
+      
+      // Use marked image if face detection was performed and rectangles were burned in
+      const displayUrl = faceDetectionResult?.markedImageUrl || url;
+      
+      // Pass face detection focal point if available
+      const focalPoint = faceDetectionResult?.focalPoint || null;
+      
+      this.render(displayUrl, photo, album, focalPoint);
     }
   },
 
@@ -108,7 +120,56 @@ Module.register<Config>("MMM-OneDrive", {
     }
   },
 
-  render: function (url: string, target: OneDriveMediaItem, album: DriveItem) {
+  // ==================== KEN BURNS DYNAMIC ANIMATION ==================== 
+  createKenBurnsKeyframes: function(animationName: string, cropX: number, cropY: number, startScale: number, totalDuration: number): void {
+    const fadeInDuration = 1; // 1 second fade in
+    const fadeOutDuration = 1; // 1 second fade out
+    
+    const fadeInPercent = (fadeInDuration / totalDuration) * 100;
+    const fadeOutPercent = ((totalDuration - fadeOutDuration) / totalDuration) * 100;
+
+    // TEMPORARY:  no zoom
+    startScale = 1.0;
+    
+    const keyframes = `
+      @keyframes ${animationName} {
+        0% {
+          opacity: 0;
+          transform: scale(${startScale});
+          transform-origin: ${cropX}% ${cropY}%;
+        }
+        ${fadeInPercent.toFixed(3)}% {
+          opacity: 1;
+          transform: scale(${startScale});
+          transform-origin: ${cropX}% ${cropY}%;
+        }
+        ${fadeOutPercent.toFixed(3)}% {
+          opacity: 1;
+          transform: scale(1.0);
+          transform-origin: ${cropX}% ${cropY}%;
+        }
+        100% {
+          opacity: 0;
+          transform: scale(1.0);
+          transform-origin: ${cropX}% ${cropY}%;
+        }
+      }
+    `;
+    
+    // Remove any existing style element for this animation
+    const existingStyle = document.getElementById(animationName);
+    if (existingStyle) {
+      existingStyle.remove();
+    }
+    
+    // Create and inject the new keyframes
+    const styleElement = document.createElement('style');
+    styleElement.id = animationName;
+    styleElement.textContent = keyframes;
+    document.head.appendChild(styleElement);
+  },
+
+  render: function (url: string, target: OneDriveMediaItem, album: DriveItem, focalPoint?: any) {
     if (this.suspended) {
       console.debug("[MMM-OneDrive] Module is suspended, skipping render");
       return;
@@ -119,6 +180,117 @@ Module.register<Config>("MMM-OneDrive", {
     current.textContent = "";
     back.style.backgroundImage = `url(${url})`;
     current.style.backgroundImage = `url(${url})`;
+    
+    // ==================== LEFT MARGIN SUPPORT WITH CLIPPING WRAPPER ==================== 
+    if (this.config.leftMargin) {
+      // Create or get the clipping wrapper
+      let clipWrapper = document.getElementById("ONEDRIVE_PHOTO_CLIP_WRAPPER");
+      if (!clipWrapper) {
+        clipWrapper = document.createElement("div");
+        clipWrapper.id = "ONEDRIVE_PHOTO_CLIP_WRAPPER";
+        clipWrapper.style.position = "absolute";
+        clipWrapper.style.overflow = "hidden";
+        clipWrapper.style.top = "10px";
+        clipWrapper.style.bottom = "10px";
+        
+        // Insert wrapper and move current inside it
+        const parent = current.parentNode;
+        parent.insertBefore(clipWrapper, current);
+        clipWrapper.appendChild(current);
+      }
+      
+      // Set wrapper boundaries to respect left margin
+      clipWrapper.style.left = this.config.leftMargin;
+      clipWrapper.style.right = "10px";
+      
+      // Reset current element positioning since it's now inside wrapper
+      current.style.left = "0";
+      current.style.right = "0";
+      current.style.top = "0";
+      current.style.bottom = "0";
+      current.style.width = "100%";
+      current.style.height = "100%";
+      current.style.overflow = "";
+      
+      // Ensure the background image is centered within the container
+      current.style.backgroundPosition = "center center";
+      current.style.backgroundSize = "contain";
+      
+    } else {
+      // Remove wrapper if no left margin needed
+      const clipWrapper = document.getElementById("ONEDRIVE_PHOTO_CLIP_WRAPPER");
+      if (clipWrapper) {
+        const parent = clipWrapper.parentNode;
+        parent.insertBefore(current, clipWrapper);
+        parent.removeChild(clipWrapper);
+        
+        // Reset current element to original positioning
+        current.style.left = "10px";
+        current.style.right = "10px";
+        current.style.top = "10px";
+        current.style.bottom = "10px";
+      }
+    }
+    
+    // ==================== KEN BURNS EFFECT ==================== 
+    if (this.config.kenBurnsEffect !== false) { // Default to enabled unless explicitly disabled
+      if (focalPoint) {
+        // Use face-detected focal point
+        const focalCenterX = (focalPoint.x + focalPoint.width / 2) / 100;
+        const focalCenterY = (focalPoint.y + focalPoint.height / 2) / 100;
+        
+        let cropX = focalCenterX * 100;
+        let cropY = focalCenterY * 100;
+        
+        // Ensure crop center is within reasonable bounds
+        cropX = Math.max(20, Math.min(80, focalCenterX * 100));
+        cropY = Math.max(20, Math.min(80, focalCenterY * 100));
+        
+        console.log(`[MMM-OneDrive] Using face-detected focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
+        this.applyKenBurnsAnimation(current, cropX, cropY, target);
+      } else {
+        // Generate random crop position for Ken Burns effect (fallback)
+        const cropX = Math.random() * 60 + 20; // 20% to 80% (avoid edges)
+        const cropY = Math.random() * 60 + 20; // 20% to 80% (avoid edges)
+        
+        console.log(`[MMM-OneDrive] Using random focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
+        this.applyKenBurnsAnimation(current, cropX, cropY, target);
+      }
+    } else {
+      // Remove any Ken Burns animation
+      current.style.removeProperty('animation');
+      current.style.removeProperty('overflow');
+    }
+    
+    this.applyCommonStyling(current, target, album, startDt);
+  },
+
+  applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem): void {
+    const startScale = 1.3 + Math.random() * 0.3; // 1.3x to 1.6x zoom
+    const totalDuration = (this.config.updateInterval/1000) + 2; // Add 2 seconds for fade in + out
+    
+    // Create unique animation name for this photo
+    const animationName = `ken-burns-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    
+    // Generate and inject dynamic keyframes
+    this.createKenBurnsKeyframes(animationName, cropX, cropY, startScale, totalDuration);
+    
+    // Apply the animation to the element
+    current.style.animation = `${animationName} ${totalDuration}s linear forwards`;
+    current.style.overflow = 'hidden';
+    
+    console.debug("[MMM-OneDrive] Ken Burns animation:", { 
+      animationName,
+      origin: `${cropX}% ${cropY}%`, 
+      startScale: startScale.toFixed(2),
+      totalDuration: `${totalDuration}s`,
+      filename: target.filename 
+    });
+  },
+
+  applyCommonStyling: function(current: HTMLElement, target: OneDriveMediaItem, album: DriveItem, startDt: Date): void {
+    // ==================== END KEN BURNS EFFECT ==================== 
+    
     current.classList.add("animated");
     const info = document.getElementById("ONEDRIVE_PHOTO_INFO");
     if (this.config.autoInfoPosition) {

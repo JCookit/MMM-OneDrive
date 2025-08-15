@@ -21,6 +21,15 @@ export type Config = {
   timeFormat: string;
   forceAuthInteractive: boolean;
   autoInfoPosition: AutoInfoPositionFunction;
+  leftMargin?: string | null; // e.g. "25vw" or "400px" - leaves space for left sidebar modules
+  kenBurnsEffect?: boolean; // Enable/disable Ken Burns crop-and-zoom effect
+  faceDetection?: {
+    enabled?: boolean; // Enable face detection for Ken Burns focal points
+    minFaceSize?: number; // Minimum face size in pixels
+    maxFaceSize?: number; // Maximum face size in pixels
+    confidenceThreshold?: number; // Detection confidence threshold (0-1)
+    debugMode?: boolean; // Save debug images with face detection rectangles
+  };
 };
 
 export type ConfigTransformed = Omit<Config, "albums" | "folders"> & {

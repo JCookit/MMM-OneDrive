@@ -145,6 +145,101 @@ const nodeHelperObject = {
     }
   },
 
+  performFaceDetection: async function(payload) {
+    const { url, photo, album, filename } = payload;
+    
+    try {
+      // Import the face detection module (dynamic import since it's optional)
+      const { faceDetector } = await import('./src/vision/faceDetection.js');
+      
+      // Extract base64 data from data URL and convert to Buffer
+      const base64Data = url.replace(/^data:image\/[a-z]+;base64,/, '');
+      const imageBuffer = Buffer.from(base64Data, 'base64');
+      
+      // Analyze image for faces directly from buffer - no file I/O needed!
+      const faceDetectionResult = await faceDetector.detectFacesFromBuffer(imageBuffer, false);
+      
+      // Convert marked image buffer to data URL if available
+      if (faceDetectionResult.markedImageBuffer) {
+        const markedImageBase64 = faceDetectionResult.markedImageBuffer.toString('base64');
+        faceDetectionResult.markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
+      }
+      
+      return faceDetectionResult;
+      
+    } catch (error) {
+      this.log_debug("Face detection failed:", error.message);
+      return null;
+    }
+  },
+
+  // analyzeFaceDetection: async function(payload) {
+  //   const { url, photo, album, filename } = payload;
+    
+  //   try {
+  //     this.log_debug("Starting face detection analysis for:", filename);
+      
+  //     // Import the face detection module (dynamic import since it's optional)
+  //     const { faceDetector } = await import('./src/vision/faceDetection.js');
+      
+  //     // Use the cache directory (not the token file path)
+  //     const cacheDir = path.join(__dirname, 'cache');
+  //     const tempDir = path.join(cacheDir, 'temp');
+  //     if (!fs.existsSync(tempDir)) {
+  //       await mkdir(tempDir, { recursive: true });
+  //     }
+      
+  //     // Extract base64 data from data URL
+  //     const base64Data = url.replace(/^data:image\/[a-z]+;base64,/, '');
+  //     const tempFilePath = path.join(tempDir, `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`);
+      
+  //     // Write base64 data to file
+  //     await writeFile(tempFilePath, base64Data, 'base64');
+      
+  //     // Analyze image for faces
+  //     const faceDetectionResult = await faceDetector.detectFaces(tempFilePath, false); // Don't need debug mode
+      
+  //     // Convert marked image buffer to data URL if available
+  //     let markedImageUrl = url; // Default to original
+  //     if (faceDetectionResult.markedImageBuffer) {
+  //       const markedImageBase64 = faceDetectionResult.markedImageBuffer.toString('base64');
+  //       markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
+  //     }
+      
+  //     // Clean up temp file
+  //     try {
+  //       await fs.promises.unlink(tempFilePath);
+  //     } catch (cleanupError) {
+  //       this.log_debug("Failed to clean up temp file:", cleanupError.message);
+  //     }
+      
+  //     // // Send result back to frontend with marked image
+  //     // this.sendSocketNotification("FACE_DETECTION_RESULT", {
+  //     //   url: markedImageUrl, // Use marked image instead of original
+  //     //   photo,
+  //     //   album,
+  //     //   faceDetectionResult
+  //     // });
+      
+  //   } catch (error) {
+  //     this.log_error("Face detection analysis failed:", error);
+      
+  //     // Send fallback result to frontend so it can proceed with random Ken Burns
+  //     // this.sendSocketNotification("FACE_DETECTION_RESULT", {
+  //     //   url,
+  //     //   photo,
+  //     //   album,
+  //     //   faceDetectionResult: {
+  //     //     faceCount: 0,
+  //     //     faces: [],
+  //     //     focalPoint: null,
+  //     //     processingTime: 0,
+  //     //     error: error.message
+  //     //   }
+  //     // });
+  //   }
+  // },
+
   log_debug: function (...args) {
     Log.debug(`[${this.name}] [node_helper]`, ...args);
   },
@@ -662,9 +757,44 @@ const nodeHelperObject = {
       const source = album || folder;
 
       const base64 = buffer.toString("base64");
+      const dataUrl = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${base64}`;
+
+      // Perform face detection if Ken Burns and face detection are enabled
+      let faceDetectionResult = null;
+      if (this.config.kenBurnsEffect !== false && 
+          this.config.faceDetection?.enabled !== false && 
+          photo.filename) {
+        
+        try {
+          this.log_debug("Performing face detection for:", photo.filename);
+          const analysisPayload = {
+            url: dataUrl,
+            photo: photo,
+            album: source,
+            filename: photo.filename
+          };
+          
+          faceDetectionResult = await this.performFaceDetection(analysisPayload);
+          this.log_debug(`Face detection completed for ${photo.filename}:`, {
+            faceCount: faceDetectionResult?.faceCount || 0,
+            processingTime: faceDetectionResult?.processingTime || 0
+          });
+          
+        } catch (error) {
+          this.log_debug("Face detection failed, using fallback:", error.message);
+          faceDetectionResult = null; // Will use random focal point
+        }
+      }
 
       this.log_debug("Image send to UI:", { id: photo.id, filename: photo.filename, index: photo._indexOfPhotos });
-      this.sendSocketNotification("RENDER_PHOTO", { photoBase64: base64, photo, album: source, info: null, errorMessage: null });
+      this.sendSocketNotification("RENDER_PHOTO", { 
+        photoBase64: base64, 
+        photo, 
+        album: source, 
+        info: null, 
+        errorMessage: null,
+        faceDetectionResult // Include face detection results
+      });
     } catch (err) {
       if (err instanceof FetchHTTPError) {
         // silently skip the error
