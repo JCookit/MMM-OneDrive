@@ -10,6 +10,108 @@ Display your photos from album of OneDrive on [MagicMirror²](https://github.com
 
 [INSTALL.md](INSTALL.md)
 
+## OpenCV Dependency for Face Detection
+
+The face detection feature requires **OpenCV 4.x** with DNN (Deep Neural Network) support and **opencv4nodejs** Node.js bindings. This is a complex setup due to native compilation requirements.
+
+### Quick Start (if you just want face detection working)
+
+If your system already has the build scripts from this repo:
+
+```bash
+# For Raspberry Pi 5 (full OpenCV build pipeline)
+./clean_opencv.sh          # Step 1: Clean system
+./sync-opencv.sh            # Step 2: Download OpenCV source  
+./build_opencv.sh           # Step 3: Build OpenCV with DNN support
+./install_opencv4nodejs.sh  # Step 4: Install Node.js bindings
+./rebuild_opencv_for_electron.sh  # Step 5: Fix Electron compatibility
+```
+
+### Why This Is Complex
+
+Face detection uses advanced OpenCV features that require:
+
+1. **Custom OpenCV Build**: System package managers (apt/yum) don't include DNN module by default
+2. **Native Compilation**: opencv4nodejs contains native code that must match your Node.js/Electron version exactly
+3. **Electron ABI Compatibility**: MagicMirror runs on Electron, not regular Node.js, requiring special rebuild steps
+
+### Build Scripts Reference
+
+All build scripts are included in this repository. Run them in order for a complete setup:
+
+#### Pi5/ARM64 Build Pipeline
+
+| Script | Purpose | Gotchas |
+|--------|---------|---------|
+| `clean_opencv.sh` | **Step 1**: Remove all existing OpenCV installations | • Removes system packages, pip installs, and source builds<br>• Required for clean build<br>• May affect other OpenCV projects |
+| `sync-opencv.sh` | **Step 2**: Download OpenCV 4.x source code | • Downloads ~500MB of source<br>• Uses latest 4.x branch for compatibility<br>• Requires good internet connection |
+| `build_opencv.sh` | **Step 3**: Compile OpenCV with DNN support | • Takes 2-4 hours on Pi5<br>• Requires 8GB+ free space<br>• May fail on memory constraints<br>• Optimized for ARM64 architecture |
+| `install_opencv4nodejs.sh` | **Step 4**: Install Node.js bindings | • Links to custom OpenCV build<br>• Specific to @u4/opencv4nodejs v7.1.2<br>• May need canvas/sharp native dependencies |
+| `validate_opencv4nodejs.sh` | **Validation**: Test Node.js bindings | • Tests actual face detection methods<br>• Verifies DNN support<br>• Safe to run multiple times |
+| `validate_opencv_dnn.sh` | **Validation**: Test DNN module | • Low-level OpenCV DNN verification<br>• Checks for essential modules |
+
+#### Electron Compatibility Fix
+
+| Script | Purpose | When to Use |
+|--------|---------|-------------|
+| `rebuild_opencv_for_electron.sh` | **Critical**: Rebuild opencv4nodejs for Electron | • **Must run after any MagicMirror/Electron update**<br>• Fixes "Module did not self-register" errors<br>• Auto-detects Electron version<br>• Uses `npx @electron/rebuild` command |
+
+### WSL/x64 Alternative
+
+| Script | Purpose | Platform |
+|--------|---------|----------|
+| `BuildOpenCVOnWSL.sh` | Complete OpenCV build for WSL2/Ubuntu | WSL2, Ubuntu x64 systems |
+
+### Common Issues & Solutions
+
+**❌ "Module did not self-register" Error**
+```bash
+# opencv4nodejs was compiled for wrong Node.js/Electron version
+./rebuild_opencv_for_electron.sh
+```
+
+**❌ "DNN module not available" Error**  
+```bash
+# OpenCV built without DNN support
+./build_opencv.sh  # Rebuild with DNN enabled
+```
+
+**❌ "Cannot find opencv4nodejs" Error**
+```bash
+# Missing Node.js bindings
+./install_opencv4nodejs.sh
+```
+
+**❌ Build fails with memory errors**
+```bash
+# Reduce parallel jobs in build_opencv.sh
+# Or add swap space: sudo fallocate -l 4G /swapfile
+```
+
+### Face Detection Features
+
+Once properly installed, face detection provides:
+
+- **YOLO v8 Face Detection**: High accuracy primary method
+- **Haar Cascade Fallback**: Reliable backup detection  
+- **Interest Point Detection**: Fallback when no faces found
+- **Debug Mode**: Visual bounding rectangles when `debugMode: true`
+- **Ken Burns Integration**: Intelligent focal points for photo transitions
+
+### Maintenance Notes
+
+- **Fragile Dependency**: opencv4nodejs breaks on Node.js/Electron version changes
+- **Keep Rebuild Script Handy**: Bookmark `rebuild_opencv_for_electron.sh` 
+- **Update Considerations**: Test face detection after any MagicMirror updates
+- **Alternative Approach**: Consider opencv-wasm for zero-maintenance (but slower performance)
+
+### Performance
+
+- **Face Detection Time**: ~700-800ms per photo on Pi5
+- **Build Time**: 2-4 hours for complete OpenCV build
+- **Disk Space**: ~8GB during build, ~2GB after cleanup
+- **Memory**: 4GB+ recommended during build
+
 ## Configuration
 
 ```javascript
