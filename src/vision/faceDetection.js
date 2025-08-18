@@ -89,6 +89,7 @@ class FaceDetector {
   async detectFacesYOLO(image) {
     try {
       console.log(`[FaceDetector] Using YOLO detection on ${image.cols}x${image.rows} image`);
+      console.log(`[FaceDetector] Creating blob from image...`);
       
       const inputSize = FACE_DETECTION_CONFIG.YOLO_INPUT_SIZE;
       const blob = cv.blobFromImage(
@@ -99,13 +100,17 @@ class FaceDetector {
         true,  // swapRB
         false  // crop
       );
+      console.log(`[FaceDetector] Blob created successfully`);
 
       // Run inference
+      console.log(`[FaceDetector] Running YOLO inference...`);
       this.yoloNet.setInput(blob);
       const outputs = this.yoloNet.forward();
+      console.log(`[FaceDetector] YOLO inference completed, processing outputs...`);
       
       // Process YOLO detections
       const rawDetections = this.processYoloDetections(outputs, image.cols, image.rows, inputSize);
+      console.log(`[FaceDetector] Raw detections: ${rawDetections.length}`);
       const cleanDetections = this.applyNMS(rawDetections, 
         FACE_DETECTION_CONFIG.YOLO_NMS_THRESHOLD, 
         FACE_DETECTION_CONFIG.YOLO_CONFIDENCE_THRESHOLD
@@ -142,7 +147,8 @@ class FaceDetector {
       return sizeFilteredFaces;
       
     } catch (error) {
-      console.error('[FaceDetector] YOLO detection failed:', error);
+      console.error('[FaceDetector] YOLO detection failed:', error.message);
+      console.error('[FaceDetector] YOLO error stack:', error.stack);
       throw error;
     }
   }
@@ -343,19 +349,27 @@ class FaceDetector {
     const startTime = Date.now();
     
     try {
-      console.log(`[FaceDetector] Starting face detection from buffer (${imageBuffer.length} bytes)`);
+      console.log(`[FaceDetector] Starting face detection from buffer (${imageBuffer.length} bytes) with debugMode: ${drawDebugInfo}`);
+      console.log(`[FaceDetector] Detection method: ${this.method}, YOLO net available: ${!!this.yoloNet}`);
       
       // Load and process the image directly from buffer
+      console.log(`[FaceDetector] Loading image from buffer...`);
       const image = await this.loadImageFromBuffer(imageBuffer);
+      console.log(`[FaceDetector] Image loaded successfully: ${image.rows}x${image.cols} pixels`);
       
       // Detect faces using selected method (YOLO or Haar)
       let faces = [];
+      console.log(`[FaceDetector] Starting face detection using method: ${this.method}`);
       if (this.method === 'yolo' && this.yoloNet) {
         try {
+          console.log(`[FaceDetector] Attempting YOLO detection...`);
           faces = await this.detectFacesYOLO(image);
+          console.log(`[FaceDetector] YOLO detection completed, found ${faces.length} faces`);
         } catch (error) {
           console.warn('[FaceDetector] YOLO detection failed, falling back to Haar:', error.message);
+          console.error('[FaceDetector] YOLO error stack:', error.stack);
           faces = await this.detectFacesHaar(image);
+          console.log(`[FaceDetector] Haar fallback completed, found ${faces.length} faces`);
         }
       } else {
         faces = await this.detectFacesHaar(image);
@@ -411,7 +425,9 @@ class FaceDetector {
 
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      console.error(`[FaceDetector] Error during buffer detection (${processingTime}ms):`, error);
+      console.error(`[FaceDetector] Error during buffer detection (${processingTime}ms):`, error.message);
+      console.error(`[FaceDetector] Face detection error stack:`, error.stack);
+      console.error(`[FaceDetector] Error context: buffer size=${imageBuffer?.length}, method=${this.method}, yoloNet=${!!this.yoloNet}`);
       
       // Return fallback result
       return {
@@ -461,7 +477,9 @@ class FaceDetector {
       
       return cvImage;
     } catch (error) {
-      console.error(`[FaceDetector] Failed to load image from buffer:`, error);
+      console.error(`[FaceDetector] Failed to load image from buffer:`, error.message);
+      console.error(`[FaceDetector] Image loading error stack:`, error.stack);
+      console.error(`[FaceDetector] Buffer info: length=${imageBuffer?.length}, type=${typeof imageBuffer}`);
       throw error;
     }
   }

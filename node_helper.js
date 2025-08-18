@@ -148,29 +148,48 @@ const nodeHelperObject = {
   performFaceDetection: async function(payload) {
     const { url, photo, album, filename } = payload;
     
+    console.log(`[NodeHelper] performFaceDetection called for: ${filename || 'unknown'}`);
+    console.log(`[NodeHelper] URL length: ${url ? url.length : 0} bytes`);
+    console.log(`[NodeHelper] Config debugMode: ${this.config?.faceDetection?.debugMode}`);
+    
     try {
+      console.log(`[NodeHelper] Attempting to import face detection module...`);
       // Import the face detection module (dynamic import since it's optional)
       const { faceDetector } = await import('./src/vision/faceDetection.js');
+      console.log(`[NodeHelper] ✅ Face detection module imported successfully`);
       
       // Extract base64 data from data URL and convert to Buffer
+      console.log(`[NodeHelper] Converting data URL to buffer...`);
       const base64Data = url.replace(/^data:image\/[a-z]+;base64,/, '');
       const imageBuffer = Buffer.from(base64Data, 'base64');
+      console.log(`[NodeHelper] ✅ Image buffer created: ${imageBuffer.length} bytes`);
       
       // Check debugMode config - if true, show bounding rectangles, otherwise clean image
       const showDebugInfo = this.config?.faceDetection?.debugMode || false;
+      console.log(`[NodeHelper] Debug mode: ${showDebugInfo}`);
       
+      console.log(`[NodeHelper] Starting face detection analysis...`);
       // Analyze image for faces directly from buffer
       const faceDetectionResult = await faceDetector.detectFacesFromBuffer(imageBuffer, showDebugInfo);
+      console.log(`[NodeHelper] ✅ Face detection completed`);
+      console.log(`[NodeHelper] Result: ${faceDetectionResult?.faceCount || 0} faces, focal point type: ${faceDetectionResult?.focalPoint?.type || 'unknown'}`);
       
       // Convert marked image buffer to data URL if available
       if (faceDetectionResult.markedImageBuffer) {
+        console.log(`[NodeHelper] Converting result image buffer to data URL...`);
         const markedImageBase64 = faceDetectionResult.markedImageBuffer.toString('base64');
         faceDetectionResult.markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
+        console.log(`[NodeHelper] ✅ Result image data URL created: ${markedImageBase64.length} chars`);
+      } else {
+        console.log(`[NodeHelper] ⚠️  No marked image buffer in result`);
       }
       
+      console.log(`[NodeHelper] ✅ performFaceDetection completed successfully`);
       return faceDetectionResult;
       
     } catch (error) {
+      console.error(`[NodeHelper] ❌ Face detection failed for ${filename || 'unknown'}:`, error.message);
+      console.error(`[NodeHelper] Error stack:`, error.stack);
       this.log_debug("Face detection failed:", error.message);
       return null;
     }
