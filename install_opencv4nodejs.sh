@@ -91,6 +91,36 @@ print_section "4️⃣ Cleaning previous opencv4nodejs installations..."
 npm uninstall opencv4nodejs @u4/opencv4nodejs 2>/dev/null || echo "No previous installations found"
 echo "✅ Previous installations cleaned"
 
+
+echo "📦 Installing build tools and graphics libraries..."
+echo "   This is required for canvas, sharp, and other native modules"
+
+# Core build dependencies
+BUILD_DEPS=(
+  build-essential
+  libcairo2-dev
+  libpango1.0-dev
+  libjpeg-dev
+  libgif-dev
+  librsvg2-dev
+  libpixman-1-dev
+  libffi-dev
+  pkg-config
+)
+
+# Install dependencies
+sudo apt update
+for dep in "${BUILD_DEPS[@]}"; do
+  if dpkg -l | grep -q "^ii  $dep "; then
+    echo "✅ $dep already installed"
+  else
+    echo "🔄 Installing $dep..."
+    sudo apt install -y "$dep"
+  fi
+done
+
+echo "✅ All build dependencies installed"
+
 # Step 5: Install opencv4nodejs
 print_section "5️⃣ Installing @u4/opencv4nodejs..."
 
@@ -98,7 +128,8 @@ echo "🔄 Installing @u4/opencv4nodejs@$OPENCV_VERSION..."
 echo "   This may take several minutes..."
 
 # Install with environment variables
-npm install "@u4/opencv4nodejs@$OPENCV_VERSION"
+# npm install "@u4/opencv4nodejs@$OPENCV_VERSION"
+npx @electron/rebuild -f -w @u4/opencv4nodejs -v 36.6.0
 
 if [ $? -eq 0 ]; then
     echo "✅ @u4/opencv4nodejs installed successfully"
