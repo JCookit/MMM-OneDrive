@@ -156,8 +156,11 @@ const nodeHelperObject = {
       const base64Data = url.replace(/^data:image\/[a-z]+;base64,/, '');
       const imageBuffer = Buffer.from(base64Data, 'base64');
       
-      // Analyze image for faces directly from buffer - no file I/O needed!
-      const faceDetectionResult = await faceDetector.detectFacesFromBuffer(imageBuffer, false);
+      // Check debugMode config - if true, show bounding rectangles, otherwise clean image
+      const showDebugInfo = this.config?.faceDetection?.debugMode || false;
+      
+      // Analyze image for faces directly from buffer
+      const faceDetectionResult = await faceDetector.detectFacesFromBuffer(imageBuffer, showDebugInfo);
       
       // Convert marked image buffer to data URL if available
       if (faceDetectionResult.markedImageBuffer) {

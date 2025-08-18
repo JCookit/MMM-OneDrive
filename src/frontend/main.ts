@@ -37,7 +37,7 @@ Module.register<Config>("MMM-OneDrive", {
       minFaceSize: 50, // Minimum face size in pixels
       maxFaceSize: 300, // Maximum face size in pixels  
       confidenceThreshold: 0.5, // Detection confidence threshold (0-1)
-      debugMode: false, // Save debug images with face detection rectangles
+      debugMode: false, // Show detection bounding rectangles on images
     },
   },
   requiresVersion: "2.24.0",

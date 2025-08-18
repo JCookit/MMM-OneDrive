@@ -28,7 +28,7 @@ export type Config = {
     minFaceSize?: number; // Minimum face size in pixels
     maxFaceSize?: number; // Maximum face size in pixels
     confidenceThreshold?: number; // Detection confidence threshold (0-1)
-    debugMode?: boolean; // Save debug images with face detection rectangles
+    debugMode?: boolean; // Show detection bounding rectangles on images
   };
 };
 

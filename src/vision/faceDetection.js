@@ -396,13 +396,15 @@ class FaceDetector {
         processingTime
       };
 
-      // Create marked image with all detections
+      // Create marked image based on debug mode
       if (drawDebugInfo) {
-        result.debugImageBuffer = await this.drawDebugInfo(image, faces, focalPoint);
-        result.markedImageBuffer = result.debugImageBuffer; // Same as debug for now
-      } else {
-        // Always burn in ALL face rectangles AND the focal point rectangle for visualization
+        // Debug mode ON: Show all detection rectangles and focal point
         result.markedImageBuffer = await this.drawAllDetections(image, faces, focalPoint);
+        console.log(`[FaceDetector] Debug mode: Added detection rectangles to image`);
+      } else {
+        // Debug mode OFF: Return clean image with no rectangles
+        result.markedImageBuffer = cv.imencode('.jpg', image);
+        console.log(`[FaceDetector] Debug mode off: Returning clean image`);
       }
 
       return result;
