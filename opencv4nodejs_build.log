@@ -1,0 +1,15 @@
+npm warn deprecated npmlog@4.1.2: This package is no longer supported.
+npm warn deprecated are-we-there-yet@1.1.7: This package is no longer supported.
+npm warn deprecated gauge@2.7.4: This package is no longer supported.
+
+added 19 packages, and audited 657 packages in 29s
+
+119 packages are looking for funding
+  run `npm fund` for details
+
+2 low severity vulnerabilities
+
+To address all issues, run:
+  npm audit fix
+
+Run `npm audit` for details.
