@@ -62,3 +62,7 @@ console.log(cv.getBuildInformation());
 
 symlink bonus:   needed for install
 sudo ln -s /usr/local/include/opencv4/opencv2 /usr/local/include/opencv2
+
+set libraries for opencv4nodejs npm build:
+export OPENCV4NODEJS_LIBRARIES="$(ls /usr/local/lib/libopencv_*.so | sed 's|.*/lib||;s|\.so.*||' | xargs -I{} echo -n '-l{} ')"
+

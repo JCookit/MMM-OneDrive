@@ -1,0 +1,23 @@
+{
+  "opencv4nodejs": {
+    "disableAutoBuild": false,
+    "opencvVersion": "4.5.4",
+    "autoBuildFlags": [
+      "-DOPENCV_GENERATE_PKGCONFIG=ON",
+      "-DOPENCV_ENABLE_NONFREE=ON",
+      "-DBUILD_opencv_dnn=ON",
+      "-DBUILD_opencv_face=ON",
+      "-DBUILD_opencv_features2d=ON",
+      "-DBUILD_opencv_objdetect=ON",
+      "-DBUILD_opencv_imgproc=ON",
+      "-DBUILD_opencv_highgui=ON",
+      "-DBUILD_opencv_imgcodecs=ON",
+      "-DBUILD_opencv_videoio=ON",
+      "-DBUILD_opencv_video=ON",
+      "-DWITH_CUDA=OFF",
+      "-DWITH_OPENCL=ON",
+      "-DWITH_OPENGL=ON"
+    ],
+    "autoBuildWithoutContrib": false
+  }
+}

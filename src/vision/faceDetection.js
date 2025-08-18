@@ -6,16 +6,20 @@
 const cv = require('@u4/opencv4nodejs');
 const sharp = require('sharp');
 const path = require('path');
+const InterestDetector = require('./interestDetection');
 
 // Configuration constants for face detection
 const FACE_DETECTION_CONFIG = {
-  // Detection method: 'haar' or 'dnn'
-  METHOD: 'haar', // Change to 'dnn' when DNN support is available
+  // Detection method: 'yolo' or 'haar'
+  METHOD: 'yolo', // YOLO for best accuracy, fallback to haar
   
-  // DNN Configuration
-  DNN_CONFIDENCE_THRESHOLD: 0.7,
-  DNN_INPUT_SIZE: 300,
-  DNN_MEAN_SUBTRACTION: [104, 117, 123],
+  // YOLO Configuration
+  YOLO_CONFIDENCE_THRESHOLD: 0.6, // Increased from 0.4 to 0.6
+  YOLO_NMS_THRESHOLD: 0.5,
+  YOLO_INPUT_SIZE: 640,
+  
+  // Face size filtering (percentage of image dimensions)
+  MIN_FACE_SIZE_PERCENT: 0.05, // Ignore faces smaller than 5% of image width/height
   
   // Haar Configuration (fallback)
   HAAR_SCALE_FACTOR: 1.05,
@@ -31,6 +35,15 @@ class FaceDetector {
   constructor() {
     this.method = FACE_DETECTION_CONFIG.METHOD;
     
+    // Initialize Interest Detector for fallback when no faces found
+    this.interestDetector = new InterestDetector({
+      sizeMode: 'adaptive', // Balanced sizing
+      minConfidenceThreshold: 0.65, // Require decent confidence
+      minScoreThreshold: 30, // Minimum interest score
+      enableDebugLogs: false // Set to true for detailed logging
+    });
+    console.log('[FaceDetector] Interest detector initialized for non-face fallback');
+    
     // Initialize Haar cascade (always available as fallback)
     try {
       this.faceCascade = new cv.CascadeClassifier(cv.HAAR_FRONTALFACE_ALT2);
@@ -40,24 +53,28 @@ class FaceDetector {
       throw new Error('Could not initialize Haar face detector');
     }
     
-    // Initialize DNN model if method is set to 'dnn'
-    if (this.method === 'dnn') {
+    // Initialize YOLO model if method is set to 'yolo'
+    if (this.method === 'yolo') {
       try {
-        // Check if DNN module is available in OpenCV
-        if (!cv.dnn) {
-          console.warn('[FaceDetector] DNN module not available in OpenCV build, falling back to Haar cascades');
-          this.method = 'haar';
-        } else {
-          console.log('[FaceDetector] Loading DNN face detection model...');
-          const modelPath = path.join(__dirname, '..', '..', 'models', 'opencv_face_detector_uint8.pb');
-          const configPath = path.join(__dirname, '..', '..', 'models', 'opencv_face_detector.pbtxt');
-          this.dnnNet = cv.readNetFromTensorflow(modelPath, configPath);
-          console.log('[FaceDetector] DNN model loaded successfully');
+        console.log('[FaceDetector] Loading YOLOv8-face model...');
+        const yoloModelPath = path.join(__dirname, '..', '..', 'models', 'yolo', 'yolov8n-face.onnx');
+        
+        console.log(`[FaceDetector] YOLO model path: ${yoloModelPath}`);
+        
+        // Verify YOLO model exists
+        const fs = require('fs');
+        if (!fs.existsSync(yoloModelPath)) {
+          throw new Error(`YOLO model file not found: ${yoloModelPath}`);
         }
+        
+        this.yoloNet = cv.readNetFromONNX(yoloModelPath);
+        this.yoloNet.setPreferableBackend(cv.DNN_BACKEND_OPENCV);
+        this.yoloNet.setPreferableTarget(cv.DNN_TARGET_CPU);
+        console.log('[FaceDetector] YOLOv8-face model loaded successfully');
       } catch (error) {
-        console.warn('[FaceDetector] Failed to load DNN model, falling back to Haar cascades:', error.message);
+        console.warn('[FaceDetector] Failed to load YOLO model, falling back to Haar:', error.message);
         this.method = 'haar'; // Fallback to Haar
-        this.dnnNet = null;
+        this.yoloNet = null;
       }
     }
     
@@ -65,188 +82,182 @@ class FaceDetector {
   }
 
   /**
-   * Detect faces in an image and determine optimal focal point
-   */
-//   async detectFaces(imagePath, drawDebugInfo = false) {
-//     const startTime = Date.now();
-    
-//     try {
-//       console.log(`[FaceDetector] Starting face detection for: ${imagePath}`);
-      
-//       // Load and process the image
-//       const image = await this.loadImage(imagePath);
-//       const grayImage = image.bgrToGray();
-      
-//       console.log(`[FaceDetector] Converting to grayscale: ${grayImage.cols}x${grayImage.rows}`);
-
-//       // Detect faces with more aggressive parameters
-//       const detectParams = {
-//         scaleFactor: 1.05,  // More fine-grained scale steps (was 1.1)
-//         minNeighbors: 3,    // Less strict neighbor requirement (was 5)
-//         minSize: new cv.Size(80, 80),  // Smaller minimum face size
-//         maxSize: new cv.Size()  // No maximum size limit
-//       };
-      
-//       console.log(`[FaceDetector] detectMultiScale parameters:`, {
-//         scaleFactor: detectParams.scaleFactor,
-//         minNeighbors: detectParams.minNeighbors,
-//         minSize: `${detectParams.minSize.width}x${detectParams.minSize.height}`,
-//         maxSize: detectParams.maxSize.width ? `${detectParams.maxSize.width}x${detectParams.maxSize.height}` : 'unlimited'
-//       });
-
-//       const faceRects = this.faceCascade.detectMultiScale(
-//         grayImage,
-//         detectParams.scaleFactor,
-//         detectParams.minNeighbors,
-//         0,
-//         detectParams.minSize,
-//         detectParams.maxSize
-//       );
-
-//       console.log(`[FaceDetector] detectMultiScale returned ${faceRects.objects.length} face rectangles`);
-
-//       console.log(`[FaceDetector] Raw face detections:`, faceRects.objects.map((rect, i) => ({
-//         index: i,
-//         x: rect.x,
-//         y: rect.y,
-//         width: rect.width,
-//         height: rect.height,
-//         area: rect.width * rect.height
-//       })));
-
-//       // Convert OpenCV rectangles to our format with validation
-//       const faces = faceRects.objects
-//         .map((rect, index) => {
-//           // Validate rectangle bounds
-//           const isValid = rect.x >= 0 && rect.y >= 0 && 
-//                          rect.width > 0 && rect.height > 0 &&
-//                          rect.x + rect.width <= image.cols &&
-//                          rect.y + rect.height <= image.rows;
-          
-//           const face = {
-//             x: rect.x,
-//             y: rect.y,
-//             width: rect.width,
-//             height: rect.height,
-//             confidence: 1.0, // OpenCV's detectMultiScale doesn't return confidence
-//             isValid,
-//             aspectRatio: rect.width / rect.height
-//           };
-          
-//           if (!isValid) {
-//             console.warn(`[FaceDetector] Invalid face rectangle ${index}:`, face);
-//             console.warn(`[FaceDetector] Image bounds: ${image.cols}x${image.rows}`);
-//           }
-          
-//           if (face.aspectRatio < 0.5 || face.aspectRatio > 2.0) {
-//             console.warn(`[FaceDetector] Unusual face aspect ratio ${index}: ${face.aspectRatio.toFixed(2)}`);
-//           }
-          
-//           return face;
-//         })
-//         .filter(face => face.isValid); // Only keep valid faces
-        
-//       console.log(`[FaceDetector] Valid faces after filtering: ${faces.length}`);
-
-//       // Calculate optimal focal point
-//       const focalPoint = this.calculateFocalPoint(faces, image.cols, image.rows);
-      
-//       const processingTime = Date.now() - startTime;
-//       console.log(`[FaceDetector] Processing completed in ${processingTime}ms`);
-
-//       const result = {
-//         faceCount: faces.length,
-//         faces,
-//         focalPoint,
-//         processingTime
-//       };
-
-//       // Generate debug/marked image with ALL face rectangles AND focal point burned in
-//       if (drawDebugInfo) {
-//         result.debugImageBuffer = await this.drawDebugInfo(image, faces, focalPoint);
-//         result.markedImageBuffer = result.debugImageBuffer; // Same as debug for now
-//       } else {
-//         // Always burn in ALL face rectangles AND the focal point rectangle for visualization
-//         result.markedImageBuffer = await this.drawAllDetections(image, faces, focalPoint);
-//       }
-
-//       return result;
-
-//     } catch (error) {
-//       const processingTime = Date.now() - startTime;
-//       console.error(`[FaceDetector] Error during detection (${processingTime}ms):`, error);
-      
-//       // Return fallback result
-//       return {
-//         faceCount: 0,
-//         faces: [],
-//         focalPoint: this.getDefaultFocalPoint(),
-//         processingTime,
-//         debugImageBuffer: undefined
-//       };
-//     }
-//   }
-
-  /**
-   * Detect faces using DNN model
+   * Detect faces using YOLOv8-face model
    * @param {cv.Mat} image - OpenCV image
    * @returns {Array} Array of face objects with confidence scores
    */
-  async detectFacesDNN(image) {
+  async detectFacesYOLO(image) {
     try {
-      console.log(`[FaceDetector] Using DNN detection on ${image.cols}x${image.rows} image`);
+      console.log(`[FaceDetector] Using YOLO detection on ${image.cols}x${image.rows} image`);
       
-      // Create blob from image
+      const inputSize = FACE_DETECTION_CONFIG.YOLO_INPUT_SIZE;
       const blob = cv.blobFromImage(
-        image,
-        1.0, // scale factor
-        new cv.Size(FACE_DETECTION_CONFIG.DNN_INPUT_SIZE, FACE_DETECTION_CONFIG.DNN_INPUT_SIZE),
-        FACE_DETECTION_CONFIG.DNN_MEAN_SUBTRACTION
+        image, 
+        1.0 / 255.0,  // Scale to [0,1]
+        new cv.Size(inputSize, inputSize), 
+        new cv.Vec3(0, 0, 0), 
+        true,  // swapRB
+        false  // crop
+      );
+
+      // Run inference
+      this.yoloNet.setInput(blob);
+      const outputs = this.yoloNet.forward();
+      
+      // Process YOLO detections
+      const rawDetections = this.processYoloDetections(outputs, image.cols, image.rows, inputSize);
+      const cleanDetections = this.applyNMS(rawDetections, 
+        FACE_DETECTION_CONFIG.YOLO_NMS_THRESHOLD, 
+        FACE_DETECTION_CONFIG.YOLO_CONFIDENCE_THRESHOLD
       );
       
-      // Set input and run forward pass
-      this.dnnNet.setInput(blob);
-      const detections = this.dnnNet.forward();
+      console.log(`[FaceDetector] YOLO found ${cleanDetections.length} faces (${rawDetections.length} before NMS)`);
       
-      console.log(`[FaceDetector] DNN forward pass completed, detections shape: ${detections.rows}x${detections.cols}`);
+      // Convert to standard face format
+      const faces = cleanDetections.map(det => ({
+        x: Math.round(det.x1),
+        y: Math.round(det.y1),
+        width: Math.round(det.x2 - det.x1),
+        height: Math.round(det.y2 - det.y1),
+        confidence: det.confidence,
+        centerX: Math.round(det.centerX),
+        centerY: Math.round(det.centerY)
+      }));
       
-      const faces = [];
-      for (let i = 0; i < detections.rows; i++) {
-        const confidence = detections.at(0, 0, i, 2);
-        
-        if (confidence > FACE_DETECTION_CONFIG.DNN_CONFIDENCE_THRESHOLD) {
-          const x = detections.at(0, 0, i, 3) * image.cols;
-          const y = detections.at(0, 0, i, 4) * image.rows;
-          const width = (detections.at(0, 0, i, 5) - detections.at(0, 0, i, 3)) * image.cols;
-          const height = (detections.at(0, 0, i, 6) - detections.at(0, 0, i, 4)) * image.rows;
-          
-          // Validate bounds
-          const isValid = x >= 0 && y >= 0 && width > 0 && height > 0 &&
-                         x + width <= image.cols && y + height <= image.rows;
-          
-          if (isValid) {
-            faces.push({
-              x: Math.round(x),
-              y: Math.round(y),
-              width: Math.round(width),
-              height: Math.round(height),
-              confidence: confidence,
-              isValid: true,
-              aspectRatio: width / height
-            });
-          }
+      // Filter faces by minimum size (ignore faces smaller than 5% of image dimensions)
+      const minWidth = image.cols * FACE_DETECTION_CONFIG.MIN_FACE_SIZE_PERCENT;
+      const minHeight = image.rows * FACE_DETECTION_CONFIG.MIN_FACE_SIZE_PERCENT;
+      
+      const sizeFilteredFaces = faces.filter(face => {
+        const widthOk = face.width >= minWidth;
+        const heightOk = face.height >= minHeight;
+        if (!widthOk || !heightOk) {
+          console.log(`[FaceDetector] Ignoring small face: ${face.width}x${face.height} (min: ${Math.round(minWidth)}x${Math.round(minHeight)})`);
         }
-      }
+        return widthOk && heightOk;
+      });
       
-      console.log(`[FaceDetector] DNN detected ${faces.length} faces above confidence threshold ${FACE_DETECTION_CONFIG.DNN_CONFIDENCE_THRESHOLD}`);
+      console.log(`[FaceDetector] After size filtering: ${sizeFilteredFaces.length} faces`);
       
-      return faces;
+      return sizeFilteredFaces;
       
     } catch (error) {
-      console.error('[FaceDetector] DNN detection failed:', error);
+      console.error('[FaceDetector] YOLO detection failed:', error);
       throw error;
     }
   }
+
+  /**
+   * Process YOLO output tensor to extract face detections
+   */
+  processYoloDetections(outputs, imgWidth, imgHeight, inputSize) {
+    const detections = [];
+    const numDetections = outputs.sizes[2]; // 8400
+    
+    for (let i = 0; i < numDetections; i++) {
+      const x_center = outputs.at(0, 0, i);
+      const y_center = outputs.at(0, 1, i);
+      const width = outputs.at(0, 2, i);
+      const height = outputs.at(0, 3, i);
+      const confidence = outputs.at(0, 4, i);
+      
+      if (confidence > 0.1) { // Initial filter
+        // Convert from input coordinates to image coordinates
+        const scaleX = imgWidth / inputSize;
+        const scaleY = imgHeight / inputSize;
+        
+        const centerX = x_center * scaleX;
+        const centerY = y_center * scaleY;
+        const w = width * scaleX;
+        const h = height * scaleY;
+        
+        // Basic validation
+        if (w > 30 && h > 30 && w < imgWidth * 0.9 && h < imgHeight * 0.9 &&
+            centerX > 0 && centerY > 0 && centerX < imgWidth && centerY < imgHeight) {
+          
+          detections.push({
+            confidence: confidence,
+            centerX: centerX,
+            centerY: centerY,
+            width: w,
+            height: h,
+            x1: Math.max(0, centerX - w / 2),
+            y1: Math.max(0, centerY - h / 2),
+            x2: Math.min(imgWidth, centerX + w / 2),
+            y2: Math.min(imgHeight, centerY + h / 2)
+          });
+        }
+      }
+    }
+    
+    return detections.sort((a, b) => b.confidence - a.confidence);
+  }
+
+  /**
+   * Apply Non-Maximum Suppression to remove duplicate detections
+   */
+  applyNMS(detections, iouThreshold = 0.5, confThreshold = 0.4) {
+    const filtered = detections.filter(d => d.confidence >= confThreshold);
+    if (filtered.length === 0) return [];
+    
+    // Simple NMS implementation (fallback if cv.dnn.NMSBoxes not available)
+    try {
+      // Try OpenCV's NMS first
+      if (cv.dnn && cv.dnn.NMSBoxes) {
+        const boxes = filtered.map(det => [det.x1, det.y1, det.x2 - det.x1, det.y2 - det.y1]);
+        const scores = filtered.map(det => det.confidence);
+        const indices = cv.dnn.NMSBoxes(boxes, scores, confThreshold, iouThreshold);
+        return indices.map(idx => filtered[idx]);
+      }
+    } catch (error) {
+      console.warn('[FaceDetector] OpenCV NMS not available, using simple NMS:', error.message);
+    }
+    
+    // Fallback: Simple manual NMS
+    const result = [];
+    const sorted = filtered.sort((a, b) => b.confidence - a.confidence);
+    
+    for (let i = 0; i < sorted.length; i++) {
+      const current = sorted[i];
+      let shouldKeep = true;
+      
+      // Check overlap with already selected boxes
+      for (const kept of result) {
+        const iou = this.calculateIOU(current, kept);
+        if (iou > iouThreshold) {
+          shouldKeep = false;
+          break;
+        }
+      }
+      
+      if (shouldKeep) {
+        result.push(current);
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Calculate Intersection over Union (IoU) between two bounding boxes
+   */
+  calculateIOU(box1, box2) {
+    const x1 = Math.max(box1.x1, box2.x1);
+    const y1 = Math.max(box1.y1, box2.y1);
+    const x2 = Math.min(box1.x2, box2.x2);
+    const y2 = Math.min(box1.y2, box2.y2);
+    
+    if (x2 <= x1 || y2 <= y1) return 0;
+    
+    const intersection = (x2 - x1) * (y2 - y1);
+    const area1 = (box1.x2 - box1.x1) * (box1.y2 - box1.y1);
+    const area2 = (box2.x2 - box2.x1) * (box2.y2 - box2.y1);
+    const union = area1 + area2 - intersection;
+    
+    return union > 0 ? intersection / union : 0;
+  }
+
+
 
   /**
    * Detect faces using Haar cascades
@@ -337,13 +348,13 @@ class FaceDetector {
       // Load and process the image directly from buffer
       const image = await this.loadImageFromBuffer(imageBuffer);
       
-      // Detect faces using selected method (DNN or Haar)
+      // Detect faces using selected method (YOLO or Haar)
       let faces = [];
-      if (this.method === 'dnn' && this.dnnNet) {
+      if (this.method === 'yolo' && this.yoloNet) {
         try {
-          faces = await this.detectFacesDNN(image);
+          faces = await this.detectFacesYOLO(image);
         } catch (error) {
-          console.warn('[FaceDetector] DNN detection failed, falling back to Haar:', error.message);
+          console.warn('[FaceDetector] YOLO detection failed, falling back to Haar:', error.message);
           faces = await this.detectFacesHaar(image);
         }
       } else {
@@ -372,8 +383,8 @@ class FaceDetector {
       
       console.log(`[FaceDetector] Final face count: ${faces.length}`);
 
-      // Calculate optimal focal point
-      const focalPoint = this.calculateFocalPoint(faces, image.cols, image.rows);
+      // Calculate optimal focal point (now async to support interest detection)
+      const focalPoint = await this.calculateFocalPoint(faces, image.cols, image.rows, image);
       
       const processingTime = Date.now() - startTime;
       console.log(`[FaceDetector] Processing completed in ${processingTime}ms`);
@@ -494,26 +505,56 @@ class FaceDetector {
   }
 
   /**
-   * Calculate optimal focal point based on detected faces
+   * Calculate optimal focal point based on detected faces or interesting regions
    * Returns coordinates as percentages (0.0 to 1.0)
    */
-  calculateFocalPoint(faces, imageWidth, imageHeight) {
+  async calculateFocalPoint(faces, imageWidth, imageHeight, cvImage) {
     
     if (faces.length === 0) {
+      console.log('[FaceDetector] No faces detected, attempting interest detection fallback');
+      
+      try {
+        const interestRegion = await this.interestDetector.findInterestingRegion(cvImage);
+        
+        if (interestRegion) {
+          console.log(`[FaceDetector] Interest detection found: ${interestRegion.type} (score: ${interestRegion.score.toFixed(1)}, confidence: ${interestRegion.confidence.toFixed(2)})`);
+          
+          // Convert to percentages and return with special marking
+          const focalPoint = {
+            x: interestRegion.x / imageWidth,
+            y: interestRegion.y / imageHeight,
+            width: interestRegion.width / imageWidth,
+            height: interestRegion.height / imageHeight,
+            type: 'interest_region',
+            method: interestRegion.method,
+            score: interestRegion.score,
+            confidence: interestRegion.confidence,
+            processingTime: interestRegion.processingTime
+          };
+          
+          console.log(`[FaceDetector] Interest region focal point: ${(focalPoint.x * 100).toFixed(1)}%-${(focalPoint.y * 100).toFixed(1)}% (${(focalPoint.width * 100).toFixed(1)}%x${(focalPoint.height * 100).toFixed(1)}%)`);
+          return focalPoint;
+        } else {
+          console.log('[FaceDetector] Interest detection found no suitable regions, using center fallback');
+        }
+      } catch (error) {
+        console.warn('[FaceDetector] Interest detection failed:', error.message);
+      }
+      
+      // Final fallback to center
       return this.getDefaultFocalPoint();
     }
 
     if (faces.length === 1) {
-      // Single face - center on it with expansion
+      // Single face - use exact face boundaries (no expansion/padding)
       const face = faces[0];
-      const expansion = Math.max(face.width, face.height) * FACE_DETECTION_CONFIG.FOCAL_AREA_EXPANSION;
       
-      // Calculate in pixels first
+      // Use exact face dimensions without expansion
       const pixelFocal = {
-        x: Math.max(0, face.x - expansion / 2),
-        y: Math.max(0, face.y - expansion / 2),
-        width: Math.min(imageWidth, face.width + expansion),
-        height: Math.min(imageHeight, face.height + expansion)
+        x: face.x,
+        y: face.y,
+        width: face.width,
+        height: face.height
       };
       
       // Convert to percentages
@@ -521,32 +562,27 @@ class FaceDetector {
         x: pixelFocal.x / imageWidth,
         y: pixelFocal.y / imageHeight,
         width: pixelFocal.width / imageWidth,
-        height: pixelFocal.height / imageHeight
+        height: pixelFocal.height / imageHeight,
+        type: 'single_face'
       };
     }
 
-    // Multiple faces - find bounding box that contains all faces
+    // Multiple faces - find tight bounding box that contains all faces (no buffer)
     let minX = Math.min(...faces.map(f => f.x));
     let minY = Math.min(...faces.map(f => f.y));
     let maxX = Math.max(...faces.map(f => f.x + f.width));
     let maxY = Math.max(...faces.map(f => f.y + f.height));
 
-    // Add buffer around the group
-    const groupWidth = maxX - minX;
-    const groupHeight = maxY - minY;
-    const buffer = Math.max(groupWidth, groupHeight) * FACE_DETECTION_CONFIG.FOCAL_AREA_EXPANSION;
-
-    minX = Math.max(0, minX - buffer / 2);
-    minY = Math.max(0, minY - buffer / 2);
-    maxX = Math.min(imageWidth, maxX + buffer / 2);
-    maxY = Math.min(imageHeight, maxY + buffer / 2);
+    // No buffer - use exact bounding box around faces
+    // (removed the buffer calculation and expansion)
 
     // Convert to percentages
     return {
       x: minX / imageWidth,
       y: minY / imageHeight,
       width: (maxX - minX) / imageWidth,
-      height: (maxY - minY) / imageHeight
+      height: (maxY - minY) / imageHeight,
+      type: 'multiple_faces'
     };
   }
 
@@ -596,28 +632,47 @@ class FaceDetector {
         );
       });
 
-      // Draw focal point rectangle in bright red (this is what Ken Burns will use)
+      // Draw focal point rectangle with color based on detection type
       // Convert focal point from percentage to pixel coordinates  
       const focalPixelX = Math.round(focalPoint.x * image.cols);
       const focalPixelY = Math.round(focalPoint.y * image.rows);
       const focalPixelWidth = Math.round(focalPoint.width * image.cols);
       const focalPixelHeight = Math.round(focalPoint.height * image.rows);
       
-      console.log(`[FaceDetector] Drawing focal point: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (from percentages: ${focalPoint.x},${focalPoint.y} ${focalPoint.width}x${focalPoint.height})`);
+      // Choose color based on focal point type
+      let focalColor, focalLabel;
+      if (focalPoint.type === 'interest_region') {
+        focalColor = new cv.Vec3(255, 165, 0); // Orange for interest regions
+        focalLabel = `Interest Area (${focalPoint.method})`;
+        console.log(`[FaceDetector] Drawing interest region: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (${focalPoint.type}: ${focalPoint.method})`);
+      } else if (focalPoint.type === 'single_face') {
+        focalColor = new cv.Vec3(0, 0, 255); // Red for single face
+        focalLabel = 'Face Focal Area';
+        console.log(`[FaceDetector] Drawing face focal point: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (single face)`);
+      } else if (focalPoint.type === 'multiple_faces') {
+        focalColor = new cv.Vec3(0, 0, 255); // Red for multiple faces
+        focalLabel = `Multi-Face Area (${faces.length})`;
+        console.log(`[FaceDetector] Drawing multi-face focal point: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (${faces.length} faces)`);
+      } else {
+        focalColor = new cv.Vec3(128, 128, 128); // Gray for default/center fallback
+        focalLabel = 'Default Center';
+        console.log(`[FaceDetector] Drawing default focal point: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (fallback)`);
+      }
+      
       markedImage.drawRectangle(
         new cv.Point2(focalPixelX, focalPixelY),
         new cv.Point2(focalPixelX + focalPixelWidth, focalPixelY + focalPixelHeight),
-        new cv.Vec3(0, 0, 255), // Bright Red for focal point
+        focalColor,
         4 // Thicker line for focal point
       );
       
       // Add focal point label
       markedImage.putText(
-        'Focal Area',
+        focalLabel,
         new cv.Point2(focalPixelX, focalPixelY - 10),
         cv.FONT_HERSHEY_SIMPLEX,
         0.7,
-        new cv.Vec3(0, 0, 255),
+        focalColor,
         2
       );
 
