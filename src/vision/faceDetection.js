@@ -42,12 +42,10 @@ class FaceDetector {
       minScoreThreshold: 30, // Minimum interest score
       enableDebugLogs: false // Set to true for detailed logging
     });
-    console.log('[FaceDetector] Interest detector initialized for non-face fallback');
     
     // Initialize Haar cascade (always available as fallback)
     try {
       this.faceCascade = new cv.CascadeClassifier(cv.HAAR_FRONTALFACE_ALT2);
-      console.log('[FaceDetector] Haar cascade classifier loaded');
     } catch (error) {
       console.error('[FaceDetector] Failed to load face cascade:', error);
       throw new Error('Could not initialize Haar face detector');
@@ -58,8 +56,6 @@ class FaceDetector {
       try {
         console.log('[FaceDetector] Loading YOLOv8-face model...');
         const yoloModelPath = path.join(__dirname, '..', '..', 'models', 'yolo', 'yolov8n-face.onnx');
-        
-        console.log(`[FaceDetector] YOLO model path: ${yoloModelPath}`);
         
         // Verify YOLO model exists
         const fs = require('fs');
@@ -78,7 +74,7 @@ class FaceDetector {
       }
     }
     
-    console.log(`[FaceDetector] Using detection method: ${this.method}`);
+    console.log(`[FaceDetector] Initialized using ${this.method} detection method`);
   }
 
   /**
@@ -88,9 +84,6 @@ class FaceDetector {
    */
   async detectFacesYOLO(image) {
     try {
-      console.log(`[FaceDetector] Using YOLO detection on ${image.cols}x${image.rows} image`);
-      console.log(`[FaceDetector] Creating blob from image...`);
-      
       const inputSize = FACE_DETECTION_CONFIG.YOLO_INPUT_SIZE;
       const blob = cv.blobFromImage(
         image, 
@@ -100,23 +93,19 @@ class FaceDetector {
         true,  // swapRB
         false  // crop
       );
-      console.log(`[FaceDetector] Blob created successfully`);
 
       // Run inference
-      console.log(`[FaceDetector] Running YOLO inference...`);
       this.yoloNet.setInput(blob);
       const outputs = this.yoloNet.forward();
-      console.log(`[FaceDetector] YOLO inference completed, processing outputs...`);
       
       // Process YOLO detections
       const rawDetections = this.processYoloDetections(outputs, image.cols, image.rows, inputSize);
-      console.log(`[FaceDetector] Raw detections: ${rawDetections.length}`);
       const cleanDetections = this.applyNMS(rawDetections, 
         FACE_DETECTION_CONFIG.YOLO_NMS_THRESHOLD, 
         FACE_DETECTION_CONFIG.YOLO_CONFIDENCE_THRESHOLD
       );
       
-      console.log(`[FaceDetector] YOLO found ${cleanDetections.length} faces (${rawDetections.length} before NMS)`);
+      console.log(`[FaceDetector] YOLO found ${cleanDetections.length} faces`);
       
       // Convert to standard face format
       const faces = cleanDetections.map(det => ({
@@ -129,22 +118,8 @@ class FaceDetector {
         centerY: Math.round(det.centerY)
       }));
       
-      // Filter faces by minimum size (ignore faces smaller than 5% of image dimensions)
-      const minWidth = image.cols * FACE_DETECTION_CONFIG.MIN_FACE_SIZE_PERCENT;
-      const minHeight = image.rows * FACE_DETECTION_CONFIG.MIN_FACE_SIZE_PERCENT;
-      
-      const sizeFilteredFaces = faces.filter(face => {
-        const widthOk = face.width >= minWidth;
-        const heightOk = face.height >= minHeight;
-        if (!widthOk || !heightOk) {
-          console.log(`[FaceDetector] Ignoring small face: ${face.width}x${face.height} (min: ${Math.round(minWidth)}x${Math.round(minHeight)})`);
-        }
-        return widthOk && heightOk;
-      });
-      
-      console.log(`[FaceDetector] After size filtering: ${sizeFilteredFaces.length} faces`);
-      
-      return sizeFilteredFaces;
+      // Return raw faces without size filtering (filtering happens in detectFacesOnly)
+      return faces;
       
     } catch (error) {
       console.error('[FaceDetector] YOLO detection failed:', error.message);
@@ -272,10 +247,7 @@ class FaceDetector {
    */
   async detectFacesHaar(image) {
     try {
-      console.log(`[FaceDetector] Using Haar cascade detection on ${image.cols}x${image.rows} image`);
-      
       const grayImage = image.bgrToGray();
-      console.log(`[FaceDetector] Converting to grayscale: ${grayImage.cols}x${grayImage.rows}`);
 
       // Detect faces with configured parameters
       const detectParams = {
@@ -284,13 +256,6 @@ class FaceDetector {
         minSize: new cv.Size(FACE_DETECTION_CONFIG.HAAR_MIN_SIZE, FACE_DETECTION_CONFIG.HAAR_MIN_SIZE),
         maxSize: new cv.Size(FACE_DETECTION_CONFIG.HAAR_MAX_SIZE, FACE_DETECTION_CONFIG.HAAR_MAX_SIZE)
       };
-      
-      console.log(`[FaceDetector] Haar detectMultiScale parameters:`, {
-        scaleFactor: detectParams.scaleFactor,
-        minNeighbors: detectParams.minNeighbors,
-        minSize: `${detectParams.minSize.width}x${detectParams.minSize.height}`,
-        maxSize: `${detectParams.maxSize.width}x${detectParams.maxSize.height}`
-      });
 
       const faceRects = this.faceCascade.detectMultiScale(
         grayImage,
@@ -301,7 +266,7 @@ class FaceDetector {
         detectParams.maxSize
       );
 
-      console.log(`[FaceDetector] Haar detectMultiScale returned ${faceRects.objects.length} face rectangles`);
+      console.log(`[FaceDetector] Haar found ${faceRects.objects.length} faces`);
 
       // Convert OpenCV rectangles to our format with validation
       const faces = faceRects.objects
@@ -328,8 +293,6 @@ class FaceDetector {
           return face;
         })
         .filter(face => face.isValid);
-        
-      console.log(`[FaceDetector] Haar valid faces after filtering: ${faces.length}`);
       
       return faces;
       
@@ -340,105 +303,28 @@ class FaceDetector {
   }
 
   /**
-   * Detect faces directly from image buffer (no file I/O required)
-   * @param {Buffer} imageBuffer - Image data as Buffer
-   * @param {boolean} drawDebugInfo - Whether to create debug images
-   * @returns {Promise<{faceCount: number, faces: Array, focalPoint: Object, processingTime: number, markedImageBuffer?: Buffer}>}
+   * Filter faces by minimum size threshold
+   * @param {Array} faces - Array of face objects
+   * @param {number} imageWidth - Image width in pixels
+   * @param {number} imageHeight - Image height in pixels
+   * @returns {Array} Filtered array of face objects
    */
-  async detectFacesFromBuffer(imageBuffer, drawDebugInfo = false) {
-    const startTime = Date.now();
+  filterFacesBySize(faces, imageWidth, imageHeight) {
+    const minWidth = imageWidth * FACE_DETECTION_CONFIG.MIN_FACE_SIZE_PERCENT;
+    const minHeight = imageHeight * FACE_DETECTION_CONFIG.MIN_FACE_SIZE_PERCENT;
     
-    try {
-      console.log(`[FaceDetector] Starting face detection from buffer (${imageBuffer.length} bytes) with debugMode: ${drawDebugInfo}`);
-      console.log(`[FaceDetector] Detection method: ${this.method}, YOLO net available: ${!!this.yoloNet}`);
-      
-      // Load and process the image directly from buffer
-      console.log(`[FaceDetector] Loading image from buffer...`);
-      const image = await this.loadImageFromBuffer(imageBuffer);
-      console.log(`[FaceDetector] Image loaded successfully: ${image.rows}x${image.cols} pixels`);
-      
-      // Detect faces using selected method (YOLO or Haar)
-      let faces = [];
-      console.log(`[FaceDetector] Starting face detection using method: ${this.method}`);
-      if (this.method === 'yolo' && this.yoloNet) {
-        try {
-          console.log(`[FaceDetector] Attempting YOLO detection...`);
-          faces = await this.detectFacesYOLO(image);
-          console.log(`[FaceDetector] YOLO detection completed, found ${faces.length} faces`);
-        } catch (error) {
-          console.warn('[FaceDetector] YOLO detection failed, falling back to Haar:', error.message);
-          console.error('[FaceDetector] YOLO error stack:', error.stack);
-          faces = await this.detectFacesHaar(image);
-          console.log(`[FaceDetector] Haar fallback completed, found ${faces.length} faces`);
-        }
-      } else {
-        faces = await this.detectFacesHaar(image);
-      }
-      
-      // Log detection results
-      if (faces.length > 0) {
-        console.log(`[FaceDetector] Raw face detections:`, faces.map((face, i) => ({
-          index: i,
-          x: face.x,
-          y: face.y,
-          width: face.width,
-          height: face.height,
-          confidence: face.confidence.toFixed(3),
-          area: face.width * face.height
-        })));
-        
-        // Validate aspect ratios
-        faces.forEach((face, index) => {
-          if (face.aspectRatio < 0.5 || face.aspectRatio > 2.0) {
-            console.warn(`[FaceDetector] Unusual face aspect ratio ${index}: ${face.aspectRatio.toFixed(2)}`);
-          }
-        });
-      }
-      
-      console.log(`[FaceDetector] Final face count: ${faces.length}`);
-
-      // Calculate optimal focal point (now async to support interest detection)
-      const focalPoint = await this.calculateFocalPoint(faces, image.cols, image.rows, image);
-      
-      const processingTime = Date.now() - startTime;
-      console.log(`[FaceDetector] Processing completed in ${processingTime}ms`);
-
-      const result = {
-        faceCount: faces.length,
-        faces,
-        focalPoint,
-        processingTime
-      };
-
-      // Create marked image based on debug mode
-      if (drawDebugInfo) {
-        // Debug mode ON: Show all detection rectangles and focal point
-        result.markedImageBuffer = await this.drawAllDetections(image, faces, focalPoint);
-        console.log(`[FaceDetector] Debug mode: Added detection rectangles to image`);
-      } else {
-        // Debug mode OFF: Return clean image with no rectangles
-        result.markedImageBuffer = cv.imencode('.jpg', image);
-        console.log(`[FaceDetector] Debug mode off: Returning clean image`);
-      }
-
-      return result;
-
-    } catch (error) {
-      const processingTime = Date.now() - startTime;
-      console.error(`[FaceDetector] Error during buffer detection (${processingTime}ms):`, error.message);
-      console.error(`[FaceDetector] Face detection error stack:`, error.stack);
-      console.error(`[FaceDetector] Error context: buffer size=${imageBuffer?.length}, method=${this.method}, yoloNet=${!!this.yoloNet}`);
-      
-      // Return fallback result
-      return {
-        faceCount: 0,
-        faces: [],
-        focalPoint: this.getDefaultFocalPoint(),
-        processingTime,
-        debugImageBuffer: undefined
-      };
+    const sizeFilteredFaces = faces.filter(face => {
+      const widthOk = face.width >= minWidth;
+      const heightOk = face.height >= minHeight;
+      return widthOk && heightOk;
+    });
+    
+    if (sizeFilteredFaces.length < faces.length) {
+      console.log(`[FaceDetector] Filtered out ${faces.length - sizeFilteredFaces.length} small faces (keeping ${sizeFilteredFaces.length})`);
     }
+    return sizeFilteredFaces;
   }
+
 
   /**
    * Load image from buffer using OpenCV with proper EXIF orientation handling
@@ -447,21 +333,11 @@ class FaceDetector {
    */
   async loadImageFromBuffer(imageBuffer) {
     try {
-      console.log(`[FaceDetector] Loading image from buffer (${imageBuffer.length} bytes)`);
-      
       // Use Sharp to handle EXIF orientation and get consistent results
       const sharpImage = sharp(imageBuffer);
       
       // Get metadata to check orientation
       const metadata = await sharpImage.metadata();
-      console.log(`[FaceDetector] Image metadata:`, {
-        width: metadata.width,
-        height: metadata.height,
-        orientation: metadata.orientation,
-        format: metadata.format,
-        hasProfile: !!metadata.icc,
-        exif: !!metadata.exif
-      });
       
       // Auto-rotate based on EXIF and convert to JPEG
       const buffer = await sharpImage
@@ -469,11 +345,8 @@ class FaceDetector {
         .jpeg({ quality: 95 }) // Higher quality for face detection
         .toBuffer();
       
-      console.log(`[FaceDetector] Processed image buffer size: ${buffer.length} bytes`);
-      
       // Load into OpenCV
       const cvImage = cv.imdecode(buffer);
-      console.log(`[FaceDetector] OpenCV image dimensions: ${cvImage.cols}x${cvImage.rows}, channels: ${cvImage.channels}`);
       
       return cvImage;
     } catch (error) {
@@ -489,21 +362,11 @@ class FaceDetector {
    */
   async loadImage(imagePath) {
     try {
-      console.log(`[FaceDetector] Loading image: ${imagePath}`);
-      
       // Use Sharp to handle EXIF orientation and get consistent results
       const sharpImage = sharp(imagePath);
       
       // Get metadata to check orientation
       const metadata = await sharpImage.metadata();
-      console.log(`[FaceDetector] Image metadata:`, {
-        width: metadata.width,
-        height: metadata.height,
-        orientation: metadata.orientation,
-        format: metadata.format,
-        hasProfile: !!metadata.icc,
-        exif: !!metadata.exif
-      });
       
       // Auto-rotate based on EXIF and convert to JPEG
       const buffer = await sharpImage
@@ -511,11 +374,8 @@ class FaceDetector {
         .jpeg({ quality: 95 }) // Higher quality for face detection
         .toBuffer();
       
-      console.log(`[FaceDetector] Processed image buffer size: ${buffer.length} bytes`);
-      
       // Load into OpenCV
       const cvImage = cv.imdecode(buffer);
-      console.log(`[FaceDetector] OpenCV image dimensions: ${cvImage.cols}x${cvImage.rows}, channels: ${cvImage.channels}`);
       
       return cvImage;
     } catch (error) {
@@ -531,13 +391,13 @@ class FaceDetector {
   async calculateFocalPoint(faces, imageWidth, imageHeight, cvImage) {
     
     if (faces.length === 0) {
-      console.log('[FaceDetector] No faces detected, attempting interest detection fallback');
+      console.log('[FaceDetector] No faces detected, using interest detection fallback');
       
       try {
         const interestRegion = await this.interestDetector.findInterestingRegion(cvImage);
         
         if (interestRegion) {
-          console.log(`[FaceDetector] Interest detection found: ${interestRegion.type} (score: ${interestRegion.score.toFixed(1)}, confidence: ${interestRegion.confidence.toFixed(2)})`);
+          console.log(`[FaceDetector] Found ${interestRegion.type} region (score: ${interestRegion.score.toFixed(1)})`);
           
           // Convert to percentages and return with special marking
           const focalPoint = {
@@ -552,10 +412,9 @@ class FaceDetector {
             processingTime: interestRegion.processingTime
           };
           
-          console.log(`[FaceDetector] Interest region focal point: ${(focalPoint.x * 100).toFixed(1)}%-${(focalPoint.y * 100).toFixed(1)}% (${(focalPoint.width * 100).toFixed(1)}%x${(focalPoint.height * 100).toFixed(1)}%)`);
           return focalPoint;
         } else {
-          console.log('[FaceDetector] Interest detection found no suitable regions, using center fallback');
+          console.log('[FaceDetector] No suitable interest regions found, using center fallback');
         }
       } catch (error) {
         console.warn('[FaceDetector] Interest detection failed:', error.message);
@@ -627,13 +486,8 @@ class FaceDetector {
       // Clone the image for drawing
       const markedImage = image.copy();
 
-      console.log(`[FaceDetector] Drawing ${faces.length} face rectangles and focal point`);
-      console.log(`[FaceDetector] Image dimensions: ${image.cols}x${image.rows}`);
-
       // Draw ALL individual face rectangles in bright green
       faces.forEach((face, index) => {
-        console.log(`[FaceDetector] Face ${index + 1}: x=${face.x}, y=${face.y}, w=${face.width}, h=${face.height}`);
-        
         markedImage.drawRectangle(
           new cv.Point2(face.x, face.y),
           new cv.Point2(face.x + face.width, face.y + face.height),
@@ -664,19 +518,15 @@ class FaceDetector {
       if (focalPoint.type === 'interest_region') {
         focalColor = new cv.Vec3(255, 165, 0); // Orange for interest regions
         focalLabel = `Interest Area (${focalPoint.method})`;
-        console.log(`[FaceDetector] Drawing interest region: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (${focalPoint.type}: ${focalPoint.method})`);
       } else if (focalPoint.type === 'single_face') {
         focalColor = new cv.Vec3(0, 0, 255); // Red for single face
         focalLabel = 'Face Focal Area';
-        console.log(`[FaceDetector] Drawing face focal point: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (single face)`);
       } else if (focalPoint.type === 'multiple_faces') {
         focalColor = new cv.Vec3(0, 0, 255); // Red for multiple faces
         focalLabel = `Multi-Face Area (${faces.length})`;
-        console.log(`[FaceDetector] Drawing multi-face focal point: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (${faces.length} faces)`);
       } else {
         focalColor = new cv.Vec3(128, 128, 128); // Gray for default/center fallback
         focalLabel = 'Default Center';
-        console.log(`[FaceDetector] Drawing default focal point: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (fallback)`);
       }
       
       markedImage.drawRectangle(
@@ -717,8 +567,6 @@ class FaceDetector {
       const focalPixelY = Math.round(focalPoint.y * image.rows);
       const focalPixelWidth = Math.round(focalPoint.width * image.cols);
       const focalPixelHeight = Math.round(focalPoint.height * image.rows);
-      
-      console.log(`[FaceDetector] Drawing focal point: ${focalPixelX},${focalPixelY} ${focalPixelWidth}x${focalPixelHeight} (from percentages: ${focalPoint.x},${focalPoint.y} ${focalPoint.width}x${focalPoint.height})`);
 
       // Draw focal point rectangle in bright red
       markedImage.drawRectangle(
@@ -769,6 +617,43 @@ class FaceDetector {
       throw error;
     }
   }
+
+  /**
+   * Pure face detection - only returns array of face objects
+   * @param {Buffer} imageBuffer - Image data as Buffer
+   * @returns {Promise<Array>} Array of face objects: [{ x, y, width, height, confidence }]
+   */
+  async detectFacesOnly(imageBuffer) {
+    try {
+      // Load image from buffer
+      const image = await this.loadImageFromBuffer(imageBuffer);
+      
+      // Detect faces using selected method
+      let faces = [];
+      if (this.method === 'yolo' && this.yoloNet) {
+        try {
+          faces = await this.detectFacesYOLO(image);
+        } catch (error) {
+          console.warn('[FaceDetector] YOLO failed, falling back to Haar:', error.message);
+          faces = await this.detectFacesHaar(image);
+        }
+      } else {
+        faces = await this.detectFacesHaar(image);
+      }
+      
+      // Filter faces by size
+      const sizeFilteredFaces = this.filterFacesBySize(faces, image.cols, image.rows);
+      
+      return sizeFilteredFaces;
+      
+    } catch (error) {
+      console.error(`[FaceDetector] Pure face detection failed:`, error.message);
+      console.error(`[FaceDetector] Error stack:`, error.stack);
+      return []; // Return empty array on failure
+    }
+  }
+
+
 }
 
 // Export singleton instance

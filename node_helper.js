@@ -145,53 +145,146 @@ const nodeHelperObject = {
     }
   },
 
-  performFaceDetection: async function(payload) {
-    const { url, photo, album, filename } = payload;
-    
-    console.log(`[NodeHelper] performFaceDetection called for: ${filename || 'unknown'}`);
-    console.log(`[NodeHelper] URL length: ${url ? url.length : 0} bytes`);
-    console.log(`[NodeHelper] Config debugMode: ${this.config?.faceDetection?.debugMode}`);
+  performFaceDetection: async function(imageBuffer, filename) {
+    console.log(`[NodeHelper] Face detection starting for: ${filename || 'unknown'}`);
     
     try {
-      console.log(`[NodeHelper] Attempting to import face detection module...`);
       // Import the face detection module (dynamic import since it's optional)
       const { faceDetector } = await import('./src/vision/faceDetection.js');
-      console.log(`[NodeHelper] ✅ Face detection module imported successfully`);
       
-      // Extract base64 data from data URL and convert to Buffer
-      console.log(`[NodeHelper] Converting data URL to buffer...`);
-      const base64Data = url.replace(/^data:image\/[a-z]+;base64,/, '');
-      const imageBuffer = Buffer.from(base64Data, 'base64');
-      console.log(`[NodeHelper] ✅ Image buffer created: ${imageBuffer.length} bytes`);
+      // Only detect faces - no focal point calculation, no debug drawing
+      const faces = await faceDetector.detectFacesOnly(imageBuffer);
+      console.log(`[NodeHelper] Face detection completed: found ${faces.length} faces`);
       
-      // Check debugMode config - if true, show bounding rectangles, otherwise clean image
-      const showDebugInfo = this.config?.faceDetection?.debugMode || false;
-      console.log(`[NodeHelper] Debug mode: ${showDebugInfo}`);
-      
-      console.log(`[NodeHelper] Starting face detection analysis...`);
-      // Analyze image for faces directly from buffer
-      const faceDetectionResult = await faceDetector.detectFacesFromBuffer(imageBuffer, showDebugInfo);
-      console.log(`[NodeHelper] ✅ Face detection completed`);
-      console.log(`[NodeHelper] Result: ${faceDetectionResult?.faceCount || 0} faces, focal point type: ${faceDetectionResult?.focalPoint?.type || 'unknown'}`);
-      
-      // Convert marked image buffer to data URL if available
-      if (faceDetectionResult.markedImageBuffer) {
-        console.log(`[NodeHelper] Converting result image buffer to data URL...`);
-        const markedImageBase64 = faceDetectionResult.markedImageBuffer.toString('base64');
-        faceDetectionResult.markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
-        console.log(`[NodeHelper] ✅ Result image data URL created: ${markedImageBase64.length} chars`);
-      } else {
-        console.log(`[NodeHelper] ⚠️  No marked image buffer in result`);
-      }
-      
-      console.log(`[NodeHelper] ✅ performFaceDetection completed successfully`);
-      return faceDetectionResult;
+      return faces; // Just return array of face objects: [{ x, y, width, height, confidence }]
       
     } catch (error) {
-      console.error(`[NodeHelper] ❌ Face detection failed for ${filename || 'unknown'}:`, error.message);
-      console.error(`[NodeHelper] Error stack:`, error.stack);
+      console.error(`[NodeHelper] Face detection failed for ${filename || 'unknown'}:`, error.message);
       this.log_debug("Face detection failed:", error.message);
-      return null;
+      return []; // Return empty array on failure
+    }
+  },
+
+  findInterestingRectangle: async function(imageBuffer, filename) {
+    console.log(`[NodeHelper] Finding focal point for: ${filename || 'unknown'}`);
+    
+    try {
+      this.log_debug("Starting focal point analysis for:", filename);
+      
+      // Step 1: Try face detection first
+      let faces = [];
+      try {
+        faces = await this.performFaceDetection(imageBuffer, filename);
+        this.log_debug(`Face detection found ${faces.length} faces for ${filename}`);
+      } catch (faceError) {
+        console.log(`[NodeHelper] Face detection failed:`, faceError.message);
+        this.log_debug("Face detection failed:", faceError.message);
+        // Continue with faces = [] (empty array)
+      }
+      
+      const { faceDetector } = await import('./src/vision/faceDetection.js');
+      
+      let focalPoint = null;
+      let method = 'none';
+      
+      // Step 2: If faces found, create all-face bounding box
+      if (faces.length > 0) {
+        console.log(`[NodeHelper] Creating focal point from ${faces.length} face(s)`);
+        
+        // Find bounding box that contains all faces
+        const minX = Math.min(...faces.map(f => f.x));
+        const minY = Math.min(...faces.map(f => f.y));
+        const maxX = Math.max(...faces.map(f => f.x + f.width));
+        const maxY = Math.max(...faces.map(f => f.y + f.height));
+        
+        // Add some padding around the faces
+        const padding = 0.0; // try no padding
+        const width = maxX - minX;
+        const height = maxY - minY;
+        const paddingX = width * padding;
+        const paddingY = height * padding;
+        
+        focalPoint = {
+          x: Math.max(0, minX - paddingX),
+          y: Math.max(0, minY - paddingY), 
+          width: width + (paddingX * 2),
+          height: height + (paddingY * 2),
+          type: 'face',
+          method: 'all_faces_bounding_box'
+        };
+        method = 'faces';
+        console.log(`[NodeHelper] Face-based focal point created for ${faces.length} faces`);
+      }
+      
+      // Step 3: If no faces, try interest detection
+      if (!focalPoint) {
+        console.log(`[NodeHelper] No faces found, trying interest detection...`);
+        try {
+          // Import and use InterestDetector directly
+          const InterestDetector = require('./src/vision/interestDetection.js');
+          const interestDetector = new InterestDetector({
+            sizeMode: 'adaptive',
+            minConfidenceThreshold: 0.65,
+            minScoreThreshold: 30,
+            enableDebugLogs: false
+          });
+          
+          const interestResult = await interestDetector.detectInterestRegions(imageBuffer);
+          if (interestResult && interestResult.focalPoint) {
+            focalPoint = interestResult.focalPoint;
+            method = 'interest';
+            console.log(`[NodeHelper] Interest-based focal point found`);
+          }
+        } catch (interestError) {
+          console.log(`[NodeHelper] Interest detection failed:`, interestError.message);
+          this.log_debug("Interest detection failed:", interestError.message);
+        }
+      }
+      
+      // Step 4: Default fallback - center crop
+      if (!focalPoint) {
+        console.log(`[NodeHelper] No focal point found, using default center`);
+        focalPoint = {
+          x: 0.25,
+          y: 0.25,
+          width: 0.5,
+          height: 0.5,
+          type: 'default',
+          method: 'center_fallback'
+        };
+        method = 'default';
+      }
+      
+      console.log(`[NodeHelper] ✅ findInterestingRectangle completed: method=${method}`);
+      this.log_debug(`Focal point analysis completed for ${filename}:`, {
+        method: method,
+        faceCount: faces.length
+      });
+      
+      return {
+        focalPoint,
+        method,
+        faces
+      };
+      
+    } catch (error) {
+      console.error(`[NodeHelper] ❌ findInterestingRectangle failed for ${filename || 'unknown'}:`, error.message);
+      console.error(`[NodeHelper] Error stack:`, error.stack);
+      this.log_debug("Focal point analysis failed, using fallback:", error.message);
+      
+      // Return default fallback on any error
+      return {
+        focalPoint: {
+          x: 0.25,
+          y: 0.25, 
+          width: 0.5,
+          height: 0.5,
+          type: 'default',
+          method: 'error_fallback'
+        },
+        method: 'error_fallback',
+        faces: []
+      };
     }
   },
 
@@ -781,30 +874,34 @@ const nodeHelperObject = {
       const base64 = buffer.toString("base64");
       const dataUrl = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${base64}`;
 
-      // Perform face detection if Ken Burns and face detection are enabled
+      // Find interesting rectangle for Ken Burns effect (handles faces, interest detection, fallbacks)
       let faceDetectionResult = null;
-      if (this.config.kenBurnsEffect !== false && 
-          this.config.faceDetection?.enabled !== false && 
-          photo.filename) {
+      if (this.config.kenBurnsEffect !== false && photo.filename) {
+        faceDetectionResult = await this.findInterestingRectangle(buffer, photo.filename);
         
-        try {
-          this.log_debug("Performing face detection for:", photo.filename);
-          const analysisPayload = {
-            url: dataUrl,
-            photo: photo,
-            album: source,
-            filename: photo.filename
-          };
-          
-          faceDetectionResult = await this.performFaceDetection(analysisPayload);
-          this.log_debug(`Face detection completed for ${photo.filename}:`, {
-            faceCount: faceDetectionResult?.faceCount || 0,
-            processingTime: faceDetectionResult?.processingTime || 0
-          });
-          
-        } catch (error) {
-          this.log_debug("Face detection failed, using fallback:", error.message);
-          faceDetectionResult = null; // Will use random focal point
+        // Generate debug image if requested (using all rectangle information)
+        if (this.config?.faceDetection?.debugMode && faceDetectionResult) {
+          try {
+            console.log(`[NodeHelper] Creating debug image for ${photo.filename} (${faceDetectionResult.faces.length} faces)`);
+            
+            const { debugImageCreator } = await import('./src/vision/debugUtils.js');
+            const debugResult = await debugImageCreator.createDebugImage(
+              buffer, 
+              faceDetectionResult.faces, 
+              faceDetectionResult.focalPoint
+            );
+            
+            if (debugResult && debugResult.markedImageBuffer) {
+              const markedImageBase64 = debugResult.markedImageBuffer.toString('base64');
+              faceDetectionResult.markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
+              console.log(`[NodeHelper] Debug image created successfully`);
+              this.log_debug(`Debug image created for ${photo.filename}`);
+            }
+          } catch (debugError) {
+            console.log(`[NodeHelper] ⚠️  Debug image creation failed:`, debugError.message);
+            this.log_debug("Debug image creation failed:", debugError.message);
+            faceDetectionResult.markedImageUrl = null;
+          }
         }
       }
 

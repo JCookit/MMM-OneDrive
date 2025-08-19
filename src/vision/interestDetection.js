@@ -577,6 +577,49 @@ class InterestDetector {
     
     return Math.max(0.2, Math.min(1.0, confidence));
   }
+
+  /**
+   * Detect interest regions from image buffer
+   * Convenience method that handles buffer-to-image conversion
+   * @param {Buffer} imageBuffer - Image data as Buffer
+   * @returns {Promise<Object|null>} Interest detection result with focal point
+   */
+  async detectInterestRegions(imageBuffer) {
+    const cv = require('@u4/opencv4nodejs');
+    
+    try {
+      console.log(`[InterestDetector] Starting interest region detection from buffer (${imageBuffer.length} bytes)`);
+      
+      // Decode image buffer using OpenCV
+      const image = cv.imdecode(imageBuffer);
+      console.log(`[InterestDetector] Image decoded: ${image.cols}x${image.rows} pixels`);
+      
+      // Use the existing interest detection
+      const interestResult = await this.findInterestingRegion(image);
+      
+      if (interestResult) {
+        const focalPoint = {
+          x: interestResult.x,
+          y: interestResult.y,
+          width: interestResult.width,
+          height: interestResult.height,
+          type: 'interest',
+          method: 'interest_detection',
+          score: interestResult.score
+        };
+        
+        console.log(`[InterestDetector] Interest region found: score=${interestResult.score}`);
+        return { focalPoint, interestResult };
+      }
+      
+      console.log(`[InterestDetector] No interest regions found`);
+      return null;
+      
+    } catch (error) {
+      console.error(`[InterestDetector] Interest region detection failed:`, error.message);
+      return null;
+    }
+  }
 }
 
 module.exports = InterestDetector;
