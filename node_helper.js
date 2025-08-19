@@ -126,18 +126,21 @@ const nodeHelperObject = {
         }
         break;
       case "MODULE_SUSPENDED":
-        this.log_info("Module suspended");
+        console.log("[NodeHelper] 💤 Module suspended");
         this.moduleSuspended = true;
-        this.uiRunner?.stop();
+        // No timer to stop in request-driven mode
         break;
       case "MODULE_RESUMED":
-        this.log_info("Module resumed");
+        console.log("[NodeHelper] 🔄 Module resumed");
         this.moduleSuspended = false;
-        this.uiRunner?.resume();
+        // No timer to resume in request-driven mode
         break;
       case "NEXT_PHOTO":
         if (!this.moduleSuspended) {
-          this.uiRunner?.skipToNext();
+          console.log("[NodeHelper] ➤ Frontend requesting next photo");
+          await this.processNextPhotoRequest();
+        } else {
+          console.log("[NodeHelper] ⏸ Module suspended, ignoring photo request");
         }
         break;
       default:
@@ -434,6 +437,7 @@ const nodeHelperObject = {
 
     if (cacheResult) {
       this.log_info("Show photos from cache for fast startup");
+      this.sendSocketNotification("SCAN_COMPLETE"); // Notify frontend that cache is ready
       this.uiRunner?.skipToNext();
     }
 
@@ -572,28 +576,42 @@ const nodeHelperObject = {
   },
 
   startUIRenderClock: function () {
-    this.log_info("Starting UI render clock");
-
+    console.log("[NodeHelper] 🚀 Switching to request-driven photo processing (no timer)");
     this.uiPhotoIndex = 0;
+    // NO TIMER - purely request driven now
+  },
 
-    this.uiRunner = createIntervalRunner(async () => {
-      if (this.moduleSuspended) {
-        this.log_warn("Module suspended and skipping UI render. The uiRunner should not be running, but something went wrong.");
-        return;
-      }
-      if (!this.localPhotoList || this.localPhotoList.length === 0) {
-        this.log_warn("Not ready to render UI. No photos in list.");
-        return;
-      }
-      const photo = this.localPhotoList[this.uiPhotoIndex];
+  processNextPhotoRequest: async function() {
+    const startTime = Date.now();
+    console.log("[NodeHelper] 🔄 Processing photo request...");
+    
+    if (!this.localPhotoList || this.localPhotoList.length === 0) {
+      console.warn("[NodeHelper] ⚠ No photos available in list");
+      this.sendSocketNotification("UPDATE_STATUS", "No photos available...");
+      this.sendSocketNotification("NO_PHOTO");
+      return;
+    }
 
+    const photo = this.localPhotoList[this.uiPhotoIndex];
+    console.log(`[NodeHelper] 📸 Processing photo ${this.uiPhotoIndex + 1}/${this.localPhotoList.length}: ${photo.filename}`);
+
+    try {
       await this.prepareShowPhoto({ photoId: photo.id });
-
+      
+      // Advance to next photo for future requests
       this.uiPhotoIndex++;
       if (this.uiPhotoIndex >= this.localPhotoList.length) {
         this.uiPhotoIndex = 0;
+        console.log("[NodeHelper] 🔄 Wrapped around to beginning of photo list");
       }
-    }, this.config.updateInterval);
+      
+      const processingTime = Date.now() - startTime;
+      console.log(`[NodeHelper] ✅ Photo processed successfully in ${processingTime}ms`);
+      
+    } catch (error) {
+      console.error("[NodeHelper] ❌ Error processing photo:", error);
+      this.sendSocketNotification("NO_PHOTO");
+    }
   },
 
   startScanning: function () {
@@ -617,6 +635,8 @@ const nodeHelperObject = {
       if (this.selectedAlbums.length > 0 || this.selectedFolders.length > 0) {
         await this.getImageList();
         this.savePhotoListCache();
+        console.log("Sending SCAN_COMPLETE");
+        this.sendSocketNotification("SCAN_COMPLETE");   // this will tell the front end to ask for a photo if it hasn't already
         return true;
       } else {
         this.log_warn("There is no album or folder to get photos.");
@@ -905,6 +925,7 @@ const nodeHelperObject = {
         }
       }
 
+      console.log(`[NodeHelper] 📤 Sending photo to frontend: ${photo.filename}`);
       this.log_debug("Image send to UI:", { id: photo.id, filename: photo.filename, index: photo._indexOfPhotos });
       this.sendSocketNotification("RENDER_PHOTO", { 
         photoBase64: base64, 

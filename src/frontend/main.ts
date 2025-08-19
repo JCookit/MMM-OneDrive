@@ -68,8 +68,17 @@ Module.register<Config>("MMM-OneDrive", {
       }
     }
 
+    // Initialize photo caching system
+    this.photoCache = null; // Will store: { photo, photoBase64, album, interestingRectangleResult }
+    this.displayTimer = null;
+    this.processingRequested = false;
+
+    console.log("[MMM-OneDrive] Frontend initialized with caching system");
     this.sendSocketNotification("INIT", config);
     this.dynamicPosition = 0;
+    
+    // Immediately request first photo to start the pipeline
+    this.requestNextPhoto();
   },
 
   socketNotificationReceived: function (noti, payload) {
@@ -92,6 +101,11 @@ Module.register<Config>("MMM-OneDrive", {
       errMsgContainer.appendChild(errMsgDiv);
       current.appendChild(errMsgContainer);
     }
+    if (noti === "SCAN_COMPLETE") {
+      // make sure a photo request is queued
+      console.log("[MMM-OneDrive] 📦 Scan complete - requesting photo");
+      this.requestNextPhoto();
+    }
     if (noti === "CLEAR_ERROR") {
       const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
       current.textContent = "";
@@ -100,25 +114,88 @@ Module.register<Config>("MMM-OneDrive", {
       const info = document.getElementById("ONEDRIVE_PHOTO_INFO");
       info.innerHTML = String(payload);
     }
+    if (noti === "NO_PHOTO") {
+      // the next UX trigger (or scan complete) will cause a photo process (and hopefully refresh)
+      this.processingRequested = false
+    }
     if (noti === "RENDER_PHOTO") {
-      this.state = { type: "newPhoto", payload };
-      const { photo, photoBase64, album, interestingRectangleResult } = payload;
-      const url = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${photoBase64}`;
+      console.log("[MMM-OneDrive] 💾 Photo received from backend, caching:", payload.photo.filename);
       
-      // Use marked image if face detection was performed and rectangles were burned in
-      const displayUrl = interestingRectangleResult?.markedImageUrl || url;
+      // Cache the photo data
+      this.photoCache = payload;
+      this.processingRequested = false;
       
-      // Pass face detection focal point if available
-      const focalPoint = interestingRectangleResult?.focalPoint || null;
-      
-      this.render(displayUrl, photo, album, focalPoint);
+      // If this is the very first photo, display it immediately and start timer
+      if (!this.displayTimer) {
+        console.log("[MMM-OneDrive] 🎬 First photo - displaying immediately");
+        this.displayCachedPhoto();
+      } else {
+        console.log("[MMM-OneDrive] 📦 Photo cached, waiting for display timer");
+      }
     }
   },
 
   notificationReceived: function (noti, _payload, _sender) {
     if (noti === "ONEDRIVE_PHOTO_NEXT") {
-      this.sendSocketNotification("NEXT_PHOTO", []);
+      this.skipToNextPhoto();
     }
+  },
+
+  // ==================== NEW CACHING SYSTEM ==================== 
+  requestNextPhoto: function() {
+    if (this.processingRequested) {
+      console.log("[MMM-OneDrive] Photo processing already in progress, skipping request");
+      return;
+    }
+    
+    this.processingRequested = true;
+    console.log("[MMM-OneDrive] ➤ Requesting next photo from backend");
+    this.sendSocketNotification("NEXT_PHOTO", []);
+  },
+
+  displayCachedPhoto: function() {
+    if (!this.photoCache) {
+      console.warn("[MMM-OneDrive] ⚠ No cached photo available for display");
+      return;
+    }
+
+    console.log("[MMM-OneDrive] 📺 Displaying cached photo:", this.photoCache.photo.filename);
+    
+    const { photo, photoBase64, album, interestingRectangleResult } = this.photoCache;
+    const url = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${photoBase64}`;
+    
+    // Use marked image if face detection was performed and rectangles were burned in
+    const displayUrl = interestingRectangleResult?.markedImageUrl || url;
+    
+    // Pass face detection focal point if available
+    const focalPoint = interestingRectangleResult?.focalPoint || null;
+    
+    this.render(displayUrl, photo, album, focalPoint);
+    
+    // Start next photo processing immediately after consuming cached photo
+    this.requestNextPhoto();
+    
+    // Schedule next display
+    this.scheduleNextDisplay();
+  },
+
+  scheduleNextDisplay: function() {
+    if (this.displayTimer) {
+      clearTimeout(this.displayTimer);
+    }
+    
+    console.log(`[MMM-OneDrive] ⏰ Next photo scheduled in ${this.config.updateInterval/1000}s`);
+    this.displayTimer = setTimeout(() => {
+      this.displayCachedPhoto();
+    }, this.config.updateInterval);
+  },
+
+  skipToNextPhoto: function() {
+    console.log("[MMM-OneDrive] ⏭ Skipping to next photo (user triggered)");
+    if (this.displayTimer) {
+      clearTimeout(this.displayTimer);
+    }
+    this.displayCachedPhoto();
   },
 
   // ==================== KEN BURNS DYNAMIC ANIMATION ==================== 
@@ -460,11 +537,11 @@ Module.register<Config>("MMM-OneDrive", {
         filename: target.filename,
         duration: new Date().getTime() - startDt.getTime(),
       }));
-    this.sendSocketNotification("IMAGE_LOADED", {
-      id: target.id,
-      filename: target.filename,
-      indexOfPhotos: target._indexOfPhotos,
-    });
+    // this.sendSocketNotification("IMAGE_LOADED", {
+    //   id: target.id,
+    //   filename: target.filename,
+    //   indexOfPhotos: target._indexOfPhotos,
+    // });
   },
 
   getDom: function () {
@@ -492,6 +569,11 @@ Module.register<Config>("MMM-OneDrive", {
   },
 
   suspend() {
+    console.log("[MMM-OneDrive] 💤 Module suspended - stopping display timer");
+    if (this.displayTimer) {
+      clearTimeout(this.displayTimer);
+      this.displayTimer = null;
+    }
     this.sendSocketNotification("MODULE_SUSPENDED", undefined);
     this.suspended = true;
     const info = document.getElementById("ONEDRIVE_PHOTO_INFO");
@@ -499,7 +581,12 @@ Module.register<Config>("MMM-OneDrive", {
   },
 
   resume() {
+    console.log("[MMM-OneDrive] 🔄 Module resumed - restarting display cycle");
     this.sendSocketNotification("MODULE_RESUMED", undefined);
     this.suspended = false;
+    // Restart the display cycle if we have cached photos
+    if (this.photoCache && !this.displayTimer) {
+      this.scheduleNextDisplay();
+    }
   },
 });
