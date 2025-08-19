@@ -184,16 +184,20 @@ Module.register<Config>("MMM-OneDrive", {
         0% {
           opacity: 0;
           transform: scale(${startScale}) translate(${startTranslateX}%, ${startTranslateY}%) ;
+          overflow: hidden;
         }
         ${fadeInPercent.toFixed(3)}% {
           opacity: 1;
+          overflow: hidden;
         }
         ${fadeOutPercent.toFixed(3)}% {
           opacity: 1;
+          overflow: hidden;
         }
         100% {
           opacity: 0;
           transform: translate(0%, 0%) scale(1.0);
+          overflow: hidden;
         }
       }
     `
