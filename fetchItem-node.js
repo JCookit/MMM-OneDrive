@@ -41,6 +41,7 @@ const fetchToUint8Array = async (url, maxRetries = 3, retryDelay = 500) => {
     try {
       return await fetchToUint8ArrayOnce(url);
     } catch (err) {
+      console.error('Fetch error, attempt ${attempt}: ${err.message}');
       if (err instanceof TypeError && err.message.includes("Failed to fetch")) {
         attempt++;
         if (attempt < maxRetries) {

@@ -109,6 +109,7 @@ Module.register<Config>("MMM-OneDrive", {
     if (noti === "CLEAR_ERROR") {
       const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
       current.textContent = "";
+      this.requestNextPhoto();
     }
     if (noti === "UPDATE_STATUS") {
       const info = document.getElementById("ONEDRIVE_PHOTO_INFO");

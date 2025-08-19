@@ -393,9 +393,10 @@ const nodeHelperObject = {
     });
     oneDrivePhotosInstance.on("authSuccess", () => {
       this.sendSocketNotification("CLEAR_ERROR");
-      if (!this.moduleSuspended) {
-        this.uiRunner?.resume();
-      }
+
+      // if (!this.moduleSuspended) {
+      //   this.uiRunner?.resume();
+      // }
     });
 
     this.albumsFilters = [];
@@ -936,6 +937,7 @@ const nodeHelperObject = {
         interestingRectangleResult // Include face detection results
       });
     } catch (err) {
+      this.socketNotificationReceived("NO_PHOTO");  // prime the pump for the UX asking again
       if (err instanceof FetchHTTPError) {
         // silently skip the error
         return;
