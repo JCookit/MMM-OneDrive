@@ -98,6 +98,19 @@ class DebugImageCreator {
           new cv.Vec3(0, 0, 255), // Red
           3
         );
+        // draw crosshair on center
+        const halfX = focalPoint.x + (focalPoint.width/2);
+        const halfY = focalPoint.y + (focalPoint.height/2);
+        image.drawLine(
+            new cv.Point2(halfX, halfY-50),
+            new cv.Point2(halfX, halfY+50),
+            new cv.Vec3(0,255,255),
+            3);
+        image.drawLine(
+            new cv.Point2(halfX-50, halfY),
+            new cv.Point2(halfX+50, halfY),
+            new cv.Vec3(0,255,255),
+            3);
         
         // Add focal point label
         const label = focalPoint.type ? `Focal Point (${focalPoint.type})` : 'Focal Point';

@@ -23,6 +23,7 @@ export type Config = {
   autoInfoPosition: AutoInfoPositionFunction;
   leftMargin?: string | null; // e.g. "25vw" or "400px" - leaves space for left sidebar modules
   kenBurnsEffect?: boolean; // Enable/disable Ken Burns crop-and-zoom effect
+  kenBurnsCenterStart?: boolean; // Start with focal point centered, then pan to natural position
   faceDetection?: {
     enabled?: boolean; // Enable face detection for Ken Burns focal points
     minFaceSize?: number; // Minimum face size in pixels

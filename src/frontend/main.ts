@@ -32,6 +32,7 @@ Module.register<Config>("MMM-OneDrive", {
     forceAuthInteractive: false,
     leftMargin: null, // e.g. "25vw" or "400px" - leaves space for left sidebar modules
     kenBurnsEffect: true, // Enable Ken Burns crop-and-zoom effect by default
+    kenBurnsCenterStart: true, // NEW: Start with focal point centered, then pan to natural position
     faceDetection: {
       enabled: true, // Enable face detection for Ken Burns focal points
       minFaceSize: 50, // Minimum face size in pixels
@@ -121,40 +122,127 @@ Module.register<Config>("MMM-OneDrive", {
   },
 
   // ==================== KEN BURNS DYNAMIC ANIMATION ==================== 
-  createKenBurnsKeyframes: function(animationName: string, cropX: number, cropY: number, startScale: number, totalDuration: number): void {
+  createKenBurnsKeyframes: function(animationName: string, cropX: number, cropY: number, focalPoint: any, imageWidth: number, imageHeight: number, totalDuration: number): void {
     const fadeInDuration = 1; // 1 second fade in
     const fadeOutDuration = 1; // 1 second fade out
     
     const fadeInPercent = (fadeInDuration / totalDuration) * 100;
     const fadeOutPercent = ((totalDuration - fadeOutDuration) / totalDuration) * 100;
 
-    // TEMPORARY:  no zoom
-    startScale = 1.0;
+    // Calculate optimal starting scale based on focal point rectangle
+    let startScale = 1.0; // Default fallback
     
+    if (focalPoint && imageWidth && imageHeight) {
+      // Calculate focal point dimensions as percentages of image
+      const focalWidthPercent = (focalPoint.width / imageWidth) * 100;
+      const focalHeightPercent = (focalPoint.height / imageHeight) * 100;
+      
+      // Calculate required scale to make focal point fit the screen
+      // We want the focal rectangle to be as large as possible while staying on screen
+      const scaleForWidth = 100 / focalWidthPercent;
+      const scaleForHeight = 100 / focalHeightPercent;
+      
+      // Use the smaller scale to ensure both dimensions fit
+      const optimalScale = Math.min(scaleForWidth, scaleForHeight);
+      
+      // Clamp the scale to reasonable bounds (1.1x to 2.5x)
+      startScale = Math.max(1.1, Math.min(10.0 /*2.5*/, optimalScale));
+      
+      console.debug("[MMM-OneDrive] Focal point scale calculation:", {
+        focalWidthPercent: focalWidthPercent.toFixed(1),
+        focalHeightPercent: focalHeightPercent.toFixed(1),
+        scaleForWidth: scaleForWidth.toFixed(2),
+        scaleForHeight: scaleForHeight.toFixed(2),
+        optimalScale: optimalScale.toFixed(2),
+        finalStartScale: startScale.toFixed(2)
+      });
+    }
+
+    // NEW: Calculate pan offsets to center the focal point at start
+    let startTranslateX = 0;
+    let startTranslateY = 0;
+    
+    if (focalPoint && this.config.kenBurnsCenterStart !== false) { // New config option
+      // Calculate how far the focal point is from center (in percentages)
+      const focalCenterX = cropX; // This is already the focal point center as %
+      const focalCenterY = cropY;
+      
+      // Calculate translation needed to move focal point to screen center (50%, 50%)
+      // Note: Transform translate uses opposite direction, so subtract from 50
+      startTranslateX = 50 - focalCenterX; 
+      startTranslateY = 50 - focalCenterY;
+      
+      console.debug("[MMM-OneDrive] Pan calculation:", {
+        focalCenter: `${focalCenterX.toFixed(1)}%, ${focalCenterY.toFixed(1)}%`,
+        translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`,
+        finalPosition: "50%, 50% (screen center)"
+      });
+    }
+
     const keyframes = `
       @keyframes ${animationName} {
         0% {
           opacity: 0;
-          transform: scale(${startScale});
-          transform-origin: ${cropX}% ${cropY}%;
+          transform: scale(${startScale}) translate(${startTranslateX}%, ${startTranslateY}%) ;
         }
         ${fadeInPercent.toFixed(3)}% {
           opacity: 1;
-          transform: scale(${startScale});
-          transform-origin: ${cropX}% ${cropY}%;
         }
         ${fadeOutPercent.toFixed(3)}% {
           opacity: 1;
-          transform: scale(1.0);
-          transform-origin: ${cropX}% ${cropY}%;
         }
         100% {
           opacity: 0;
-          transform: scale(1.0);
-          transform-origin: ${cropX}% ${cropY}%;
+          transform: translate(0%, 0%) scale(1.0);
         }
       }
-    `;
+    `
+
+    // experiment 1
+    // const keyframes = `
+    //   @keyframes ${animationName} {
+    //     0% {
+    //       opacity: 0;
+    //       transform: translate(${startTranslateX}%, ${startTranslateY}%) scale(${startScale});
+    //     }
+    //     ${fadeInPercent.toFixed(3)}% {
+    //       opacity: 1;
+    //     }
+    //     ${fadeOutPercent.toFixed(3)}% {
+    //       opacity: 1;
+    //     }
+    //     100% {
+    //       opacity: 0;
+    //       transform: translate(0%, 0%) scale(1.0);
+    //     }
+    //   }
+    // `
+    
+    // known good below -- do not touch
+    // const keyframes = `
+    //   @keyframes ${animationName} {
+    //     0% {
+    //       opacity: 0;
+    //       transform: scale(${startScale});
+    //       transform-origin: ${cropX}% ${cropY}%;
+    //     }
+    //     ${fadeInPercent.toFixed(3)}% {
+    //       opacity: 1;
+    //       transform: scale(${startScale});
+    //       transform-origin: ${cropX}% ${cropY}%;
+    //     }
+    //     ${fadeOutPercent.toFixed(3)}% {
+    //       opacity: 1;
+    //       transform: scale(1.0);
+    //       transform-origin: ${cropX}% ${cropY}%;
+    //     }
+    //     100% {
+    //       opacity: 0;
+    //       transform: scale(1.0);
+    //       transform-origin: ${cropX}% ${cropY}%;
+    //     }
+    //   }
+    // `;
     
     // Remove any existing style element for this animation
     const existingStyle = document.getElementById(animationName);
@@ -235,19 +323,31 @@ Module.register<Config>("MMM-OneDrive", {
     // ==================== KEN BURNS EFFECT ==================== 
     if (this.config.kenBurnsEffect !== false) { // Default to enabled unless explicitly disabled
       if (focalPoint) {
-        // Use face-detected focal point
-        const focalCenterX = (focalPoint.x + focalPoint.width / 2) / 100;
-        const focalCenterY = (focalPoint.y + focalPoint.height / 2) / 100;
+        // Get image dimensions from photo metadata for pixel-to-percentage conversion
+        const imageWidth = Number(target.mediaMetadata?.width);
+        const imageHeight = Number(target.mediaMetadata?.height);
         
-        let cropX = focalCenterX * 100;
-        let cropY = focalCenterY * 100;
-        
-        // Ensure crop center is within reasonable bounds
-        cropX = Math.max(20, Math.min(80, focalCenterX * 100));
-        cropY = Math.max(20, Math.min(80, focalCenterY * 100));
-        
-        console.log(`[MMM-OneDrive] Using face-detected focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
-        this.applyKenBurnsAnimation(current, cropX, cropY, target);
+        if (imageWidth && imageHeight) {
+          // Convert pixel coordinates to percentages (backend sends pixels, we need percentages)
+          const focalCenterX = (focalPoint.x + focalPoint.width / 2) / imageWidth;
+          const focalCenterY = (focalPoint.y + focalPoint.height / 2) / imageHeight;
+          
+          let cropX = focalCenterX * 100;
+          let cropY = focalCenterY * 100;
+          
+          // Ensure crop center is within reasonable bounds
+          cropX = Math.max(20, Math.min(80, cropX));
+          cropY = Math.max(20, Math.min(80, cropY));
+          
+          console.log(`[MMM-OneDrive] Using face-detected focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
+          this.applyKenBurnsAnimation(current, cropX, cropY, target, focalPoint);
+        } else {
+          console.warn(`[MMM-OneDrive] Missing image dimensions for focal point conversion, using random`);
+          // Fallback to random if no image dimensions
+          const cropX = Math.random() * 60 + 20;
+          const cropY = Math.random() * 60 + 20;
+          this.applyKenBurnsAnimation(current, cropX, cropY, target);
+        }
       } else {
         // Generate random crop position for Ken Burns effect (fallback)
         const cropX = Math.random() * 60 + 20; // 20% to 80% (avoid edges)
@@ -265,15 +365,18 @@ Module.register<Config>("MMM-OneDrive", {
     this.applyCommonStyling(current, target, album, startDt);
   },
 
-  applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem): void {
-    const startScale = 1.3 + Math.random() * 0.3; // 1.3x to 1.6x zoom
+  applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, focalPoint?: any): void {
     const totalDuration = (this.config.updateInterval/1000) + 2; // Add 2 seconds for fade in + out
     
     // Create unique animation name for this photo
     const animationName = `ken-burns-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     
-    // Generate and inject dynamic keyframes
-    this.createKenBurnsKeyframes(animationName, cropX, cropY, startScale, totalDuration);
+    // Get image dimensions for scale calculation
+    const imageWidth = Number(target.mediaMetadata?.width) || 0;
+    const imageHeight = Number(target.mediaMetadata?.height) || 0;
+    
+    // Generate and inject dynamic keyframes (scale calculation happens inside)
+    this.createKenBurnsKeyframes(animationName, cropX, cropY, focalPoint, imageWidth, imageHeight, totalDuration);
     
     // Apply the animation to the element
     current.style.animation = `${animationName} ${totalDuration}s linear forwards`;
@@ -282,9 +385,9 @@ Module.register<Config>("MMM-OneDrive", {
     console.debug("[MMM-OneDrive] Ken Burns animation:", { 
       animationName,
       origin: `${cropX}% ${cropY}%`, 
-      startScale: startScale.toFixed(2),
       totalDuration: `${totalDuration}s`,
-      filename: target.filename 
+      filename: target.filename,
+      hasFocalPoint: !!focalPoint
     });
   },
 
