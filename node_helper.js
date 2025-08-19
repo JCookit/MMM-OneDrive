@@ -875,32 +875,32 @@ const nodeHelperObject = {
       const dataUrl = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${base64}`;
 
       // Find interesting rectangle for Ken Burns effect (handles faces, interest detection, fallbacks)
-      let faceDetectionResult = null;
+      let interestingRectangleResult = null;
       if (this.config.kenBurnsEffect !== false && photo.filename) {
-        faceDetectionResult = await this.findInterestingRectangle(buffer, photo.filename);
+        interestingRectangleResult = await this.findInterestingRectangle(buffer, photo.filename);
         
         // Generate debug image if requested (using all rectangle information)
-        if (this.config?.faceDetection?.debugMode && faceDetectionResult) {
+        if (this.config?.faceDetection?.debugMode && interestingRectangleResult) {
           try {
-            console.log(`[NodeHelper] Creating debug image for ${photo.filename} (${faceDetectionResult.faces.length} faces)`);
+            console.log(`[NodeHelper] Creating debug image for ${photo.filename} (${interestingRectangleResult.faces.length} faces)`);
             
             const { debugImageCreator } = await import('./src/vision/debugUtils.js');
             const debugResult = await debugImageCreator.createDebugImage(
               buffer, 
-              faceDetectionResult.faces, 
-              faceDetectionResult.focalPoint
+              interestingRectangleResult.faces, 
+              interestingRectangleResult.focalPoint
             );
             
             if (debugResult && debugResult.markedImageBuffer) {
               const markedImageBase64 = debugResult.markedImageBuffer.toString('base64');
-              faceDetectionResult.markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
+              interestingRectangleResult.markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
               console.log(`[NodeHelper] Debug image created successfully`);
               this.log_debug(`Debug image created for ${photo.filename}`);
             }
           } catch (debugError) {
             console.log(`[NodeHelper] ⚠️  Debug image creation failed:`, debugError.message);
             this.log_debug("Debug image creation failed:", debugError.message);
-            faceDetectionResult.markedImageUrl = null;
+            interestingRectangleResult.markedImageUrl = null;
           }
         }
       }
@@ -912,7 +912,7 @@ const nodeHelperObject = {
         album: source, 
         info: null, 
         errorMessage: null,
-        faceDetectionResult // Include face detection results
+        interestingRectangleResult // Include face detection results
       });
     } catch (err) {
       if (err instanceof FetchHTTPError) {

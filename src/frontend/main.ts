@@ -101,14 +101,14 @@ Module.register<Config>("MMM-OneDrive", {
     }
     if (noti === "RENDER_PHOTO") {
       this.state = { type: "newPhoto", payload };
-      const { photo, photoBase64, album, faceDetectionResult } = payload;
+      const { photo, photoBase64, album, interestingRectangleResult } = payload;
       const url = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${photoBase64}`;
       
       // Use marked image if face detection was performed and rectangles were burned in
-      const displayUrl = faceDetectionResult?.markedImageUrl || url;
+      const displayUrl = interestingRectangleResult?.markedImageUrl || url;
       
       // Pass face detection focal point if available
-      const focalPoint = faceDetectionResult?.focalPoint || null;
+      const focalPoint = interestingRectangleResult?.focalPoint || null;
       
       this.render(displayUrl, photo, album, focalPoint);
     }
