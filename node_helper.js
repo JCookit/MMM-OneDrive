@@ -678,7 +678,7 @@ const nodeHelperObject = {
         console.log("[NodeHelper] 🗑️ Double garbage collection forced");
       } else {
         // Alternative: Force memory pressure to trigger GC
-        const dummy = new Array(100000).fill(0); // Create pressure
+        const dummy = new Array(1000000).fill(0); // Create pressure
         dummy.length = 0; // Clear immediately
         console.log("[NodeHelper] 🗑️ Memory pressure applied to trigger GC");
       }

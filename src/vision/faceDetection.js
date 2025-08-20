@@ -17,7 +17,7 @@ const FACE_DETECTION_CONFIG = {
   // YOLO Configuration
   YOLO_CONFIDENCE_THRESHOLD: 0.6, // Increased from 0.4 to 0.6
   YOLO_NMS_THRESHOLD: 0.5,
-  YOLO_INPUT_SIZE: 640,
+  YOLO_INPUT_SIZE: 416,
   
   // Face size filtering (percentage of image dimensions)
   MIN_FACE_SIZE_PERCENT: 0.05, // Ignore faces smaller than 5% of image width/height
