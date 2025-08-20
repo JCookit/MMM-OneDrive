@@ -38,6 +38,18 @@ class InterestDetector {
       : () => {};
   }
   
+  safeRelease(matObject, objectName = 'Mat') {
+    if (matObject && typeof matObject.release === 'function') {
+      try {
+        matObject.release();
+        console.debug(`[FaceDetector] ✅ Released ${objectName}`);
+      } catch (releaseError) {
+        console.warn(`[FaceDetector] ⚠️  Failed to release ${objectName}:`, releaseError.message);
+        // Don't throw - just log the warning
+      }
+    }
+  }
+
   /**
    * Main entry point - find most interesting region in image
    * Returns null if nothing meets confidence thresholds
@@ -157,9 +169,7 @@ class InterestDetector {
       return null;
     } finally {
       // CRITICAL: Release Mat objects
-      if (workingImage && workingImage !== image) {
-        workingImage.release(); // Only release if we created a resized copy
-      }
+      this.safeRelease(workingImage, 'working image');
     }
   }
   
@@ -213,7 +223,7 @@ class InterestDetector {
       return [];
     } finally {
       // Release gray image
-      if (gray) gray.release();
+      this.safeRelease(gray, 'gray image');
     }
   }
   
@@ -265,7 +275,7 @@ class InterestDetector {
               continue;
             } finally {
               // CRITICAL: Release ROI Mat
-              if (roi) roi.release();
+              this.safeRelease(roi, `Sliding window ROI`);
             }
           }
         }
@@ -280,7 +290,7 @@ class InterestDetector {
       return [];
     } finally {
       // Release gray image
-      if (gray) gray.release();
+      this.safeRelease(gray, 'gray image');
     }
   }
   
@@ -345,7 +355,7 @@ class InterestDetector {
       return [];
     } finally {
       // Release gray image
-      if (gray) gray.release();
+      this.safeRelease(gray, 'gray image');
     }
   }
   
@@ -638,7 +648,7 @@ class InterestDetector {
       return null;
     } finally {
       // CRITICAL: Release the decoded image
-      if (image) image.release();
+      this.safeRelease(image, 'decoded image');
     }
   }
 }

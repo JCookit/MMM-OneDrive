@@ -77,6 +77,18 @@ class FaceDetector {
     console.log(`[FaceDetector] Initialized using ${this.method} detection method`);
   }
 
+  safeRelease(matObject, objectName = 'Mat') {
+    if (matObject && typeof matObject.release === 'function') {
+      try {
+        matObject.release();
+        console.debug(`[FaceDetector] ✅ Released ${objectName}`);
+      } catch (releaseError) {
+        console.warn(`[FaceDetector] ⚠️  Failed to release ${objectName}:`, releaseError.message);
+        // Don't throw - just log the warning
+      }
+    }
+  }
+
   /**
    * Detect faces using YOLOv8-face model
    * @param {cv.Mat} image - OpenCV image
@@ -129,8 +141,8 @@ class FaceDetector {
       throw error;
     } finally {
       // CRITICAL: Release OpenCV Mat objects
-      if (blob) blob.release();
-      if (outputs) outputs.release();
+      this.safeRelease(blob, 'YOLO blob');
+      this.safeRelease(outputs, 'YOLO outputs');
     }
     
   }
@@ -309,7 +321,7 @@ class FaceDetector {
       throw error;
     } finally {
       // CRITICAL: Release the decoded image
-      if (grayImage) grayImage.release();
+      this.safeRelease(grayImage, 'Haar gray image');
     }
   }
 
@@ -666,7 +678,7 @@ class FaceDetector {
       return []; // Return empty array on failure
     } finally {
       // CRITICAL: Release all Mat objects
-      if (image) image.release();
+      this.safeRelease(image, 'decoded image');
     }
   }
 
