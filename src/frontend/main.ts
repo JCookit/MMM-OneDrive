@@ -9,6 +9,13 @@ import type { DriveItem } from "@microsoft/microsoft-graph-types";
  */
 declare const moment: typeof MomentLib;
 
+// TypeScript interface extension for HTMLElement to store animation reference
+declare global {
+  interface HTMLElement {
+    kenBurnsAnimation?: Animation;
+  }
+}
+
 Module.register<Config>("MMM-OneDrive", {
   defaults: {
     albums: [],
@@ -384,6 +391,144 @@ createStaticBackdropKeyframes: function(): void {
   applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, focalPoint?: any): void {
     const totalDuration = (this.config.updateInterval/1000); 
     
+    // ==================== ANIMATION METHOD SWITCH ==================== 
+    // Toggle: true = Web Animations API (more explicit memory control)
+//         false = CSS animations (original approach)
+const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
+    
+    if (USE_WEB_ANIMATIONS_API) {
+      this.applyWebAnimationsKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
+    } else {
+      this.applyCSSAnimationKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
+    }
+  },
+
+  // NEW: Web Animations API implementation
+  applyWebAnimationsKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any): void {
+    // Get image dimensions for scale calculation
+    const imageWidth = Number(target.mediaMetadata?.width) || 0;
+    const imageHeight = Number(target.mediaMetadata?.height) || 0;
+    
+    // Calculate optimal starting scale based on focal point rectangle
+    let startScale = 1.5; // Default fallback
+    
+    if (focalPoint && imageWidth && imageHeight) {
+      // Calculate focal point dimensions as percentages of image
+      const focalWidthPercent = (focalPoint.width / imageWidth) * 100;
+      const focalHeightPercent = (focalPoint.height / imageHeight) * 100;
+      
+      // Calculate required scale to make focal point fit the screen
+      const scaleForWidth = 100 / focalWidthPercent;
+      const scaleForHeight = 100 / focalHeightPercent;
+      
+      // Use the smaller scale to ensure both dimensions fit
+      const optimalScale = Math.min(scaleForWidth, scaleForHeight);
+      
+      // Clamp the scale to reasonable bounds (1.1x to 2.5x to prevent memory issues)
+      startScale = Math.max(1.1, Math.min(2.5, optimalScale));
+      
+      console.debug("[MMM-OneDrive] Web Animations - Focal point scale calculation:", {
+        focalWidthPercent: focalWidthPercent.toFixed(1),
+        focalHeightPercent: focalHeightPercent.toFixed(1),
+        optimalScale: optimalScale.toFixed(2),
+        finalStartScale: startScale.toFixed(2)
+      });
+    }
+
+    // Calculate pan offsets to center the focal point at start
+    let startTranslateX = 0;
+    let startTranslateY = 0;
+    
+    if (focalPoint && this.config.kenBurnsCenterStart !== false) {
+      // Calculate translation needed to move focal point to screen center (50%, 50%)
+      startTranslateX = 50 - cropX; 
+      startTranslateY = 50 - cropY;
+      
+      console.debug("[MMM-OneDrive] Web Animations - Pan calculation:", {
+        focalCenter: `${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`,
+        translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`
+      });
+    }
+
+    // Cancel any existing animation
+    if (current.kenBurnsAnimation) {
+      current.kenBurnsAnimation.cancel();
+      delete current.kenBurnsAnimation;
+    }
+    
+    // Reset element to clean state
+    current.style.animation = 'none';
+    current.classList.remove('animated');
+    current.style.opacity = '1';
+    current.style.transform = '';
+    current.style.overflow = 'hidden';
+
+    // Define keyframes for Web Animations API
+    const keyframes = [
+      {
+        // 0% - Start: fade in, scaled and translated to focal point
+        opacity: 0,
+        transform: `scale(${startScale}) translate(${startTranslateX}%, ${startTranslateY}%)`
+      },
+      {
+        // 10% - Fade in complete, still at focal point
+        opacity: 1,
+        transform: `scale(${startScale}) translate(${startTranslateX}%, ${startTranslateY}%)`,
+        offset: 0.1
+      },
+      {
+        // 90% - Still visible, animated to normal position and scale
+        opacity: 1,
+        transform: `scale(1.0) translate(0%, 0%)`,
+        offset: 0.9
+      },
+      {
+        // 100% - Fade out complete
+        opacity: 0,
+        transform: `scale(1.0) translate(0%, 0%)`
+      }
+    ];
+
+    // Create the animation
+    const animation = current.animate(keyframes, {
+      duration: totalDuration * 1000, // Convert to milliseconds
+      easing: 'linear',
+      fill: 'forwards'
+    });
+
+    // Store animation reference for cleanup
+    current.kenBurnsAnimation = animation;
+
+    // Clean up when animation finishes
+    animation.addEventListener('finish', () => {
+      if (current.kenBurnsAnimation === animation) {
+        delete current.kenBurnsAnimation;
+      }
+      console.debug("[MMM-OneDrive] Web Animation completed and cleaned up");
+    });
+
+    // Clean up if animation is cancelled
+    animation.addEventListener('cancel', () => {
+      if (current.kenBurnsAnimation === animation) {
+        delete current.kenBurnsAnimation;
+      }
+      console.debug("[MMM-OneDrive] Web Animation cancelled and cleaned up");
+    });
+
+    console.debug("[MMM-OneDrive] Ken Burns Web Animation started:", { 
+      method: "Web Animations API",
+      totalDuration: `${totalDuration}s`,
+      filename: target.filename,
+      hasFocalPoint: !!focalPoint,
+      startScale: startScale.toFixed(2),
+      translation: `${startTranslateX}%, ${startTranslateY}%`,
+      keyframes: keyframes.length
+    });
+  },
+
+  // ORIGINAL: CSS Animation implementation (kept as fallback)
+  // Original CSS implementation  
+  applyCSSAnimationKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any): void {
     // Ensure static keyframes exist
     this.createStaticKenBurnsKeyframes();
     
@@ -409,7 +554,7 @@ createStaticBackdropKeyframes: function(): void {
       // Clamp the scale to reasonable bounds (1.1x to 2.5x to prevent memory issues)
       startScale = Math.max(1.1, Math.min(2.5, optimalScale));
       
-      console.debug("[MMM-OneDrive] Focal point scale calculation:", {
+      console.debug("[MMM-OneDrive] CSS Animation - Focal point scale calculation:", {
         focalWidthPercent: focalWidthPercent.toFixed(1),
         focalHeightPercent: focalHeightPercent.toFixed(1),
         optimalScale: optimalScale.toFixed(2),
@@ -426,7 +571,7 @@ createStaticBackdropKeyframes: function(): void {
       startTranslateX = 50 - cropX; 
       startTranslateY = 50 - cropY;
       
-      console.debug("[MMM-OneDrive] Pan calculation:", {
+      console.debug("[MMM-OneDrive] CSS Animation - Pan calculation:", {
         focalCenter: `${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`,
         translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`
       });
@@ -467,7 +612,7 @@ createStaticBackdropKeyframes: function(): void {
       current.style.removeProperty('--start-y');
     });
     
-    console.debug("[MMM-OneDrive] Ken Burns animation (static):", { 
+    console.debug("[MMM-OneDrive] Ken Burns animation (CSS):", { 
       animation: "ken-burns-static",
       totalDuration: `${totalDuration}s`,
       filename: target.filename,
