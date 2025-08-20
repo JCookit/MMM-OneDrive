@@ -17,7 +17,7 @@ const FACE_DETECTION_CONFIG = {
   // YOLO Configuration
   YOLO_CONFIDENCE_THRESHOLD: 0.6, // Increased from 0.4 to 0.6
   YOLO_NMS_THRESHOLD: 0.5,
-  YOLO_INPUT_SIZE: 640,
+  YOLO_INPUT_SIZE: 640, // Restored to 640 for better quality
   
   // Face size filtering (percentage of image dimensions)
   MIN_FACE_SIZE_PERCENT: 0.05, // Ignore faces smaller than 5% of image width/height
@@ -88,6 +88,13 @@ class FaceDetector {
     let outputs = null;
     try {
       const inputSize = FACE_DETECTION_CONFIG.YOLO_INPUT_SIZE;
+      
+      // CRITICAL: Add safety check before blob creation
+      if (!image || image.empty || image.cols === 0 || image.rows === 0) {
+        throw new Error('Invalid image for YOLO processing');
+      }
+      
+      console.log(`[FaceDetector] Creating YOLO blob ${inputSize}x${inputSize}...`);
       blob = cv.blobFromImage(
         image, 
         1.0 / 255.0,  // Scale to [0,1]
@@ -96,10 +103,15 @@ class FaceDetector {
         true,  // swapRB
         false  // crop
       );
+      trackMat(blob, 'YOLO blob');
+      console.log(`[FaceDetector] YOLO blob created successfully`);
 
-      // Run inference
+      // Run inference with additional safety
+      console.log(`[FaceDetector] Running YOLO inference...`);
       this.yoloNet.setInput(blob);
       outputs = this.yoloNet.forward();
+      trackMat(outputs, 'YOLO outputs');
+      console.log(`[FaceDetector] YOLO inference completed`);
       
       // Process YOLO detections
       const rawDetections = this.processYoloDetections(outputs, image.cols, image.rows, inputSize);

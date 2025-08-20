@@ -5,6 +5,7 @@
 
 const cv = require('@u4/opencv4nodejs');
 const sharp = require('sharp');
+const { trackMat, safeRelease, logMatMemory } = require('./matManager');
 
 class DebugImageCreator {
   
@@ -14,9 +15,12 @@ class DebugImageCreator {
    * @returns {Promise<cv.Mat>} OpenCV Mat object
    */
   async loadImageFromBuffer(imageBuffer) {
+    let sharpImage = null;
+    let cvImage = null;
+    
     try {
       // Use Sharp to handle EXIF orientation and get consistent results
-      const sharpImage = sharp(imageBuffer);
+      sharpImage = sharp(imageBuffer);
       
       // Get metadata to check orientation
       const metadata = await sharpImage.metadata();
@@ -28,13 +32,17 @@ class DebugImageCreator {
         .toBuffer();
       
       // Load into OpenCV
-      const cvImage = cv.imdecode(buffer);
+      cvImage = cv.imdecode(buffer);
+      trackMat(cvImage, 'debug image from buffer');
       
       return cvImage;
     } catch (error) {
       console.error(`[DebugUtils] Failed to load image from buffer:`, error.message);
       console.error(`[DebugUtils] Image loading error stack:`, error.stack);
       console.error(`[DebugUtils] Buffer info: length=${imageBuffer?.length}, type=${typeof imageBuffer}`);
+      
+      // Cleanup on error
+      safeRelease(cvImage, 'debug image (error cleanup)');
       throw error;
     }
   }
@@ -47,11 +55,14 @@ class DebugImageCreator {
    * @returns {Promise<Object>} Debug result with marked image buffer
    */
   async createDebugImage(imageBuffer, faces, focalPoint) {
+    let image = null;
+    logMatMemory("BEFORE debug image creation");
+    
     try {
       console.log(`[DebugUtils] Creating debug image with ${faces.length} faces`);
       
       // Load image from buffer
-      const image = await this.loadImageFromBuffer(imageBuffer);
+      image = await this.loadImageFromBuffer(imageBuffer);
       
       // Draw face rectangles in green
       faces.forEach((face, index) => {
@@ -127,11 +138,16 @@ class DebugImageCreator {
       // Convert to buffer
       const markedImageBuffer = cv.imencode('.jpg', image);
       
+      logMatMemory("AFTER debug image creation");
       return { markedImageBuffer };
       
     } catch (error) {
       console.error(`[DebugUtils] Debug image creation failed:`, error.message);
       throw error;
+    } finally {
+      // CRITICAL: Release the image Mat object
+      safeRelease(image, 'debug image');
+      logMatMemory("AFTER debug image cleanup");
     }
   }
 
@@ -144,11 +160,14 @@ class DebugImageCreator {
    * @returns {Promise<Object>} Debug result with comprehensive marked image
    */
   async createComprehensiveDebugImage(imageBuffer, faces, focalPoint, interestRegions = []) {
+    let image = null;
+    logMatMemory("BEFORE comprehensive debug image creation");
+    
     try {
       console.log(`[DebugUtils] Creating comprehensive debug image with ${faces.length} faces, ${interestRegions.length} interest regions`);
       
       // Load image from buffer
-      const image = await this.loadImageFromBuffer(imageBuffer);
+      image = await this.loadImageFromBuffer(imageBuffer);
       
       // Draw interest regions in blue (if any)
       interestRegions.forEach((region, index) => {
@@ -229,6 +248,10 @@ class DebugImageCreator {
     } catch (error) {
       console.error(`[DebugUtils] Comprehensive debug image creation failed:`, error.message);
       throw error;
+    } finally {
+      // CRITICAL: Release the image Mat object
+      safeRelease(image, 'comprehensive debug image');
+      logMatMemory("AFTER comprehensive debug image cleanup");
     }
   }
 }
