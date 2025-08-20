@@ -83,9 +83,11 @@ class FaceDetector {
    * @returns {Array} Array of face objects with confidence scores
    */
   async detectFacesYOLO(image) {
+    let blob = null;
+    let outputs = null;
     try {
       const inputSize = FACE_DETECTION_CONFIG.YOLO_INPUT_SIZE;
-      const blob = cv.blobFromImage(
+      blob = cv.blobFromImage(
         image, 
         1.0 / 255.0,  // Scale to [0,1]
         new cv.Size(inputSize, inputSize), 
@@ -96,7 +98,7 @@ class FaceDetector {
 
       // Run inference
       this.yoloNet.setInput(blob);
-      const outputs = this.yoloNet.forward();
+      outputs = this.yoloNet.forward();
       
       // Process YOLO detections
       const rawDetections = this.processYoloDetections(outputs, image.cols, image.rows, inputSize);
@@ -125,7 +127,12 @@ class FaceDetector {
       console.error('[FaceDetector] YOLO detection failed:', error.message);
       console.error('[FaceDetector] YOLO error stack:', error.stack);
       throw error;
+    } finally {
+      // CRITICAL: Release OpenCV Mat objects
+      if (blob) blob.release();
+      if (outputs) outputs.release();
     }
+    
   }
 
   /**
@@ -246,8 +253,9 @@ class FaceDetector {
    * @returns {Array} Array of face objects
    */
   async detectFacesHaar(image) {
+    let grayImage = null;
     try {
-      const grayImage = image.bgrToGray();
+      grayImage = image.bgrToGray();
 
       // Detect faces with configured parameters
       const detectParams = {
@@ -299,6 +307,9 @@ class FaceDetector {
     } catch (error) {
       console.error('[FaceDetector] Haar detection failed:', error);
       throw error;
+    } finally {
+      // CRITICAL: Release the decoded image
+      if (grayImage) grayImage.release();
     }
   }
 
@@ -353,8 +364,10 @@ class FaceDetector {
       console.error(`[FaceDetector] Failed to load image from buffer:`, error.message);
       console.error(`[FaceDetector] Image loading error stack:`, error.stack);
       console.error(`[FaceDetector] Buffer info: length=${imageBuffer?.length}, type=${typeof imageBuffer}`);
+
+      if (cvImage) cvImage.release();
       throw error;
-    }
+    } 
   }
 
   /**
@@ -481,142 +494,142 @@ class FaceDetector {
   /**
    * Draw ALL face rectangles and focal point rectangle on image
    */
-  async drawAllDetections(image, faces, focalPoint) {
-    try {
-      // Clone the image for drawing
-      const markedImage = image.copy();
+  // async drawAllDetections(image, faces, focalPoint) {
+  //   try {
+  //     // Clone the image for drawing
+  //     const markedImage = image.copy();
 
-      // Draw ALL individual face rectangles in bright green
-      faces.forEach((face, index) => {
-        markedImage.drawRectangle(
-          new cv.Point2(face.x, face.y),
-          new cv.Point2(face.x + face.width, face.y + face.height),
-          new cv.Vec3(0, 255, 0), // Bright Green for individual faces
-          3
-        );
+  //     // Draw ALL individual face rectangles in bright green
+  //     faces.forEach((face, index) => {
+  //       markedImage.drawRectangle(
+  //         new cv.Point2(face.x, face.y),
+  //         new cv.Point2(face.x + face.width, face.y + face.height),
+  //         new cv.Vec3(0, 255, 0), // Bright Green for individual faces
+  //         3
+  //       );
         
-        // Add face number label
-        markedImage.putText(
-          `Face ${index + 1}`,
-          new cv.Point2(face.x, face.y - 5),
-          cv.FONT_HERSHEY_SIMPLEX,
-          0.6,
-          new cv.Vec3(0, 255, 0),
-          2
-        );
-      });
+  //       // Add face number label
+  //       markedImage.putText(
+  //         `Face ${index + 1}`,
+  //         new cv.Point2(face.x, face.y - 5),
+  //         cv.FONT_HERSHEY_SIMPLEX,
+  //         0.6,
+  //         new cv.Vec3(0, 255, 0),
+  //         2
+  //       );
+  //     });
 
-      // Draw focal point rectangle with color based on detection type
-      // Convert focal point from percentage to pixel coordinates  
-      const focalPixelX = Math.round(focalPoint.x * image.cols);
-      const focalPixelY = Math.round(focalPoint.y * image.rows);
-      const focalPixelWidth = Math.round(focalPoint.width * image.cols);
-      const focalPixelHeight = Math.round(focalPoint.height * image.rows);
+  //     // Draw focal point rectangle with color based on detection type
+  //     // Convert focal point from percentage to pixel coordinates  
+  //     const focalPixelX = Math.round(focalPoint.x * image.cols);
+  //     const focalPixelY = Math.round(focalPoint.y * image.rows);
+  //     const focalPixelWidth = Math.round(focalPoint.width * image.cols);
+  //     const focalPixelHeight = Math.round(focalPoint.height * image.rows);
       
-      // Choose color based on focal point type
-      let focalColor, focalLabel;
-      if (focalPoint.type === 'interest_region') {
-        focalColor = new cv.Vec3(255, 165, 0); // Orange for interest regions
-        focalLabel = `Interest Area (${focalPoint.method})`;
-      } else if (focalPoint.type === 'single_face') {
-        focalColor = new cv.Vec3(0, 0, 255); // Red for single face
-        focalLabel = 'Face Focal Area';
-      } else if (focalPoint.type === 'multiple_faces') {
-        focalColor = new cv.Vec3(0, 0, 255); // Red for multiple faces
-        focalLabel = `Multi-Face Area (${faces.length})`;
-      } else {
-        focalColor = new cv.Vec3(128, 128, 128); // Gray for default/center fallback
-        focalLabel = 'Default Center';
-      }
+  //     // Choose color based on focal point type
+  //     let focalColor, focalLabel;
+  //     if (focalPoint.type === 'interest_region') {
+  //       focalColor = new cv.Vec3(255, 165, 0); // Orange for interest regions
+  //       focalLabel = `Interest Area (${focalPoint.method})`;
+  //     } else if (focalPoint.type === 'single_face') {
+  //       focalColor = new cv.Vec3(0, 0, 255); // Red for single face
+  //       focalLabel = 'Face Focal Area';
+  //     } else if (focalPoint.type === 'multiple_faces') {
+  //       focalColor = new cv.Vec3(0, 0, 255); // Red for multiple faces
+  //       focalLabel = `Multi-Face Area (${faces.length})`;
+  //     } else {
+  //       focalColor = new cv.Vec3(128, 128, 128); // Gray for default/center fallback
+  //       focalLabel = 'Default Center';
+  //     }
       
-      markedImage.drawRectangle(
-        new cv.Point2(focalPixelX, focalPixelY),
-        new cv.Point2(focalPixelX + focalPixelWidth, focalPixelY + focalPixelHeight),
-        focalColor,
-        4 // Thicker line for focal point
-      );
+  //     markedImage.drawRectangle(
+  //       new cv.Point2(focalPixelX, focalPixelY),
+  //       new cv.Point2(focalPixelX + focalPixelWidth, focalPixelY + focalPixelHeight),
+  //       focalColor,
+  //       4 // Thicker line for focal point
+  //     );
       
-      // Add focal point label
-      markedImage.putText(
-        focalLabel,
-        new cv.Point2(focalPixelX, focalPixelY - 10),
-        cv.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        focalColor,
-        2
-      );
+  //     // Add focal point label
+  //     markedImage.putText(
+  //       focalLabel,
+  //       new cv.Point2(focalPixelX, focalPixelY - 10),
+  //       cv.FONT_HERSHEY_SIMPLEX,
+  //       0.7,
+  //       focalColor,
+  //       2
+  //     );
 
-      // Convert back to buffer
-      return cv.imencode('.jpg', markedImage);
-    } catch (error) {
-      console.error('[FaceDetector] Error creating marked image with all detections:', error);
-      throw error;
-    }
-  }
+  //     // Convert back to buffer
+  //     return cv.imencode('.jpg', markedImage);
+  //   } catch (error) {
+  //     console.error('[FaceDetector] Error creating marked image with all detections:', error);
+  //     throw error;
+  //   }
+  // }
 
   /**
    * Draw only the focal point rectangle on image
    */
-  async drawFocalPointOnly(image, focalPoint) {
-    try {
-      // Clone the image for drawing
-      const markedImage = image.copy();
+  // async drawFocalPointOnly(image, focalPoint) {
+  //   try {
+  //     // Clone the image for drawing
+  //     const markedImage = image.copy();
 
-      // Convert focal point from percentage to pixel coordinates
-      const focalPixelX = Math.round(focalPoint.x * image.cols);
-      const focalPixelY = Math.round(focalPoint.y * image.rows);
-      const focalPixelWidth = Math.round(focalPoint.width * image.cols);
-      const focalPixelHeight = Math.round(focalPoint.height * image.rows);
+  //     // Convert focal point from percentage to pixel coordinates
+  //     const focalPixelX = Math.round(focalPoint.x * image.cols);
+  //     const focalPixelY = Math.round(focalPoint.y * image.rows);
+  //     const focalPixelWidth = Math.round(focalPoint.width * image.cols);
+  //     const focalPixelHeight = Math.round(focalPoint.height * image.rows);
 
-      // Draw focal point rectangle in bright red
-      markedImage.drawRectangle(
-        new cv.Point2(focalPixelX, focalPixelY),
-        new cv.Point2(focalPixelX + focalPixelWidth, focalPixelY + focalPixelHeight),
-        new cv.Vec3(0, 0, 255), // Bright Red
-        4 // Thicker line for visibility
-      );
+  //     // Draw focal point rectangle in bright red
+  //     markedImage.drawRectangle(
+  //       new cv.Point2(focalPixelX, focalPixelY),
+  //       new cv.Point2(focalPixelX + focalPixelWidth, focalPixelY + focalPixelHeight),
+  //       new cv.Vec3(0, 0, 255), // Bright Red
+  //       4 // Thicker line for visibility
+  //     );
 
-      // Convert back to buffer
-      return cv.imencode('.jpg', markedImage);
-    } catch (error) {
-      console.error('[FaceDetector] Error creating marked image:', error);
-      throw error;
-    }
-  }
+  //     // Convert back to buffer
+  //     return cv.imencode('.jpg', markedImage);
+  //   } catch (error) {
+  //     console.error('[FaceDetector] Error creating marked image:', error);
+  //     throw error;
+  //   }
+  // }
 
   /**
    * Draw debug information on image
    */
-  async drawDebugInfo(image, faces, focalPoint) {
-    try {
-      // Clone the image for drawing
-      const debugImage = image.copy();
+  // async drawDebugInfo(image, faces, focalPoint) {
+  //   try {
+  //     // Clone the image for drawing
+  //     const debugImage = image.copy();
 
-      // Draw face rectangles in green
-      faces.forEach(face => {
-        debugImage.drawRectangle(
-          new cv.Point2(face.x, face.y),
-          new cv.Point2(face.x + face.width, face.y + face.height),
-          new cv.Vec3(0, 255, 0), // Green
-          2
-        );
-      });
+  //     // Draw face rectangles in green
+  //     faces.forEach(face => {
+  //       debugImage.drawRectangle(
+  //         new cv.Point2(face.x, face.y),
+  //         new cv.Point2(face.x + face.width, face.y + face.height),
+  //         new cv.Vec3(0, 255, 0), // Green
+  //         2
+  //       );
+  //     });
 
-      // Draw focal point rectangle in red
-      debugImage.drawRectangle(
-        new cv.Point2(focalPoint.x, focalPoint.y),
-        new cv.Point2(focalPoint.x + focalPoint.width, focalPoint.y + focalPoint.height),
-        new cv.Vec3(0, 0, 255), // Red
-        3
-      );
+  //     // Draw focal point rectangle in red
+  //     debugImage.drawRectangle(
+  //       new cv.Point2(focalPoint.x, focalPoint.y),
+  //       new cv.Point2(focalPoint.x + focalPoint.width, focalPoint.y + focalPoint.height),
+  //       new cv.Vec3(0, 0, 255), // Red
+  //       3
+  //     );
 
-      // Convert back to buffer
-      return cv.imencode('.jpg', debugImage);
-    } catch (error) {
-      console.error('[FaceDetector] Error creating debug image:', error);
-      throw error;
-    }
-  }
+  //     // Convert back to buffer
+  //     return cv.imencode('.jpg', debugImage);
+  //   } catch (error) {
+  //     console.error('[FaceDetector] Error creating debug image:', error);
+  //     throw error;
+  //   }
+  // }
 
   /**
    * Pure face detection - only returns array of face objects
@@ -624,9 +637,10 @@ class FaceDetector {
    * @returns {Promise<Array>} Array of face objects: [{ x, y, width, height, confidence }]
    */
   async detectFacesOnly(imageBuffer) {
+    let image = null;
     try {
       // Load image from buffer
-      const image = await this.loadImageFromBuffer(imageBuffer);
+      image = await this.loadImageFromBuffer(imageBuffer);
       
       // Detect faces using selected method
       let faces = [];
@@ -650,6 +664,9 @@ class FaceDetector {
       console.error(`[FaceDetector] Pure face detection failed:`, error.message);
       console.error(`[FaceDetector] Error stack:`, error.stack);
       return []; // Return empty array on failure
+    } finally {
+      // CRITICAL: Release all Mat objects
+      if (image) image.release();
     }
   }
 

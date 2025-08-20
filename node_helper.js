@@ -598,7 +598,13 @@ const nodeHelperObject = {
 
     try {
       await this.prepareShowPhoto({ photoId: photo.id });
-      
+
+      // FORCE GARBAGE COLLECTION after each photo
+      if (global.gc) {
+        global.gc();
+        console.log("[NodeHelper] 🗑️ Forced garbage collection");
+      }
+    
       // Advance to next photo for future requests
       this.uiPhotoIndex++;
       if (this.uiPhotoIndex >= this.localPhotoList.length) {
@@ -829,6 +835,9 @@ const nodeHelperObject = {
 
   prepareShowPhoto: async function ({ photoId }) {
 
+    // Log memory usage before processing
+    const memBefore = process.memoryUsage();
+    
     const photo = this.localPhotoList.find((p) => p.id === photoId);
     if (!photo) {
       this.log_error(`Photo with id ${photoId} not found in local list`);
@@ -936,6 +945,17 @@ const nodeHelperObject = {
         errorMessage: null,
         interestingRectangleResult // Include face detection results
       });
+
+      // EXPLICITLY NULL LARGE OBJECTS
+      buffer = null;
+      if (interestingRectangleResult?.markedImageBuffer) {
+        interestingRectangleResult.markedImageBuffer = null;
+      }
+      
+      // Log memory usage after processing
+      const memAfter = process.memoryUsage();
+      console.log(`[NodeHelper] 💾 Memory after photo processing: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB heap (+${Math.round((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024)}MB)`);
+
     } catch (err) {
       this.sendSocketNotification("NO_PHOTO");  // prime the pump for the UX asking again
       if (err instanceof FetchHTTPError) {

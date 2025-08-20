@@ -46,9 +46,10 @@ class InterestDetector {
     const startTime = Date.now();
     this.log(`Processing ${image.cols}x${image.rows} image`);
     
+    let workingImage = null;
     try {
       // Resize large images for processing efficiency
-      let workingImage = image;
+      workingImage = image;
       let scale = 1.0;
       
       const maxDimension = 1200;
@@ -154,6 +155,11 @@ class InterestDetector {
     } catch (error) {
       console.error(`[InterestDetection] Error processing image: ${error.message}`);
       return null;
+    } finally {
+      // CRITICAL: Release Mat objects
+      if (workingImage && workingImage !== image) {
+        workingImage.release(); // Only release if we created a resized copy
+      }
     }
   }
   
@@ -162,9 +168,9 @@ class InterestDetector {
    */
   async detectFeatureClusterRegions(workingImage, safeZone) {
     const startTime = Date.now();
-    
+    let gray = null;
     try {
-      const gray = workingImage.bgrToGray();
+      gray = workingImage.bgrToGray();
       const features = cv.goodFeaturesToTrack(gray, 50, 0.01, 15);
       
       if (features.length === 0) return [];
@@ -205,6 +211,9 @@ class InterestDetector {
     } catch (error) {
       this.log(`Feature clustering failed: ${error.message}`);
       return [];
+    } finally {
+      // Release gray image
+      if (gray) gray.release();
     }
   }
   
@@ -213,9 +222,9 @@ class InterestDetector {
    */
   async slidingWindowAnalysis(workingImage, safeZone, baseSize, smallSize, largeSize) {
     const startTime = Date.now();
-    
+    let gray = null;
     try {
-      const gray = workingImage.bgrToGray();
+      gray = workingImage.bgrToGray();
       const regions = [];
       
       // Multiple adaptive window sizes
@@ -225,9 +234,9 @@ class InterestDetector {
       for (const windowSize of windowSizes) {
         for (let y = safeZone.minY; y + windowSize <= safeZone.maxY; y += stepSize) {
           for (let x = safeZone.minX; x + windowSize <= safeZone.maxX; x += stepSize) {
-            
+            let roi = null;
             try {
-              const roi = gray.getRegion(new cv.Rect(x, y, windowSize, windowSize));
+              roi = gray.getRegion(new cv.Rect(x, y, windowSize, windowSize));
               
               // Multi-metric evaluation
               const mean = roi.mean()[0];
@@ -254,6 +263,9 @@ class InterestDetector {
               }
             } catch (error) {
               continue;
+            } finally {
+              // CRITICAL: Release ROI Mat
+              if (roi) roi.release();
             }
           }
         }
@@ -266,6 +278,9 @@ class InterestDetector {
     } catch (error) {
       this.log(`Sliding window failed: ${error.message}`);
       return [];
+    } finally {
+      // Release gray image
+      if (gray) gray.release();
     }
   }
   
@@ -274,9 +289,9 @@ class InterestDetector {
    */
   async detectGradientRegions(workingImage, safeZone, baseSize) {
     const startTime = Date.now();
-    
+    let gray = null;
     try {
-      const gray = workingImage.bgrToGray();
+      gray = workingImage.bgrToGray();
       const regions = [];
       const regionSize = baseSize;
       const stepSize = Math.round(regionSize * 0.6);
@@ -328,6 +343,9 @@ class InterestDetector {
     } catch (error) {
       this.log(`Gradient analysis failed: ${error.message}`);
       return [];
+    } finally {
+      // Release gray image
+      if (gray) gray.release();
     }
   }
   
@@ -586,12 +604,12 @@ class InterestDetector {
    */
   async detectInterestRegions(imageBuffer) {
     const cv = require('@u4/opencv4nodejs');
-    
+    let image = null;
     try {
       console.log(`[InterestDetector] Starting interest region detection from buffer (${imageBuffer.length} bytes)`);
       
       // Decode image buffer using OpenCV
-      const image = cv.imdecode(imageBuffer);
+      image = cv.imdecode(imageBuffer);
       console.log(`[InterestDetector] Image decoded: ${image.cols}x${image.rows} pixels`);
       
       // Use the existing interest detection
@@ -618,6 +636,9 @@ class InterestDetector {
     } catch (error) {
       console.error(`[InterestDetector] Interest region detection failed:`, error.message);
       return null;
+    } finally {
+      // CRITICAL: Release the decoded image
+      if (image) image.release();
     }
   }
 }

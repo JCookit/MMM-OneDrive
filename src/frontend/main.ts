@@ -378,6 +378,7 @@ createStaticBackdropKeyframes: function(): void {
     }
     
     this.applyCommonStyling(current, target, album, startDt, this.config.kenBurnsEffect !== false);
+
   },
 
   applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, focalPoint?: any): void {
