@@ -7,6 +7,7 @@ const cv = require('@u4/opencv4nodejs');
 const sharp = require('sharp');
 const path = require('path');
 const InterestDetector = require('./interestDetection');
+const { trackMat, safeRelease, logMatMemory } = require('./matManager');
 
 // Configuration constants for face detection
 const FACE_DETECTION_CONFIG = {
@@ -77,18 +78,6 @@ class FaceDetector {
     console.log(`[FaceDetector] Initialized using ${this.method} detection method`);
   }
 
-  safeRelease(matObject, objectName = 'Mat') {
-    if (matObject && typeof matObject.release === 'function') {
-      try {
-        matObject.release();
-        console.debug(`[FaceDetector] ✅ Released ${objectName}`);
-      } catch (releaseError) {
-        console.warn(`[FaceDetector] ⚠️  Failed to release ${objectName}:`, releaseError.message);
-        // Don't throw - just log the warning
-      }
-    }
-  }
-
   /**
    * Detect faces using YOLOv8-face model
    * @param {cv.Mat} image - OpenCV image
@@ -141,8 +130,8 @@ class FaceDetector {
       throw error;
     } finally {
       // CRITICAL: Release OpenCV Mat objects
-      this.safeRelease(blob, 'YOLO blob');
-      this.safeRelease(outputs, 'YOLO outputs');
+      safeRelease(blob, 'YOLO blob');
+      safeRelease(outputs, 'YOLO outputs');
     }
     
   }
@@ -321,7 +310,7 @@ class FaceDetector {
       throw error;
     } finally {
       // CRITICAL: Release the decoded image
-      this.safeRelease(grayImage, 'Haar gray image');
+      safeRelease(grayImage, 'Haar gray image');
     }
   }
 
@@ -650,35 +639,43 @@ class FaceDetector {
    */
   async detectFacesOnly(imageBuffer) {
     let image = null;
+    logMatMemory("BEFORE face detection");
+    
     try {
       // Load image from buffer
       image = await this.loadImageFromBuffer(imageBuffer);
+      trackMat(image, 'decoded image');
       
       // Detect faces using selected method
       let faces = [];
       if (this.method === 'yolo' && this.yoloNet) {
         try {
+          console.log(`[FaceDetector] Using YOLO detection`);
           faces = await this.detectFacesYOLO(image);
         } catch (error) {
           console.warn('[FaceDetector] YOLO failed, falling back to Haar:', error.message);
           faces = await this.detectFacesHaar(image);
         }
       } else {
+        console.log(`[FaceDetector] Using Haar detection`);
         faces = await this.detectFacesHaar(image);
       }
       
       // Filter faces by size
       const sizeFilteredFaces = this.filterFacesBySize(faces, image.cols, image.rows);
+      logMatMemory("AFTER face detection");
+      console.log(`[FaceDetector] ✅ Face detection complete: ${sizeFilteredFaces.length} faces found`);
       
       return sizeFilteredFaces;
       
     } catch (error) {
-      console.error(`[FaceDetector] Pure face detection failed:`, error.message);
+      console.error(`[FaceDetector] ❌ Pure face detection failed:`, error.message);
       console.error(`[FaceDetector] Error stack:`, error.stack);
       return []; // Return empty array on failure
     } finally {
       // CRITICAL: Release all Mat objects
-      this.safeRelease(image, 'decoded image');
+      safeRelease(image, 'decoded image');
+      logMatMemory("AFTER face detection cleanup");
     }
   }
 

@@ -342,7 +342,7 @@ createStaticBackdropKeyframes: function(): void {
     }
     
     // ==================== KEN BURNS EFFECT ==================== 
-    if (this.config.kenBurnsEffect !== false) { // Default to enabled unless explicitly disabled
+    if (false && this.config.kenBurnsEffect !== false) { // Default to enabled unless explicitly disabled
       if (focalPoint) {
         // Get image dimensions from photo metadata for pixel-to-percentage conversion
         const imageWidth = Number(target.mediaMetadata?.width);

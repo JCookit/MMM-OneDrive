@@ -14,6 +14,9 @@ const { RE2 } = require("re2-wasm");
 const NodeHelper = require("node_helper");
 const Log = require("logger");
 const crypto = require("crypto");
+const { getMatStats, logMatMemory } = require("./src/vision/matManager");
+
+// OpenCV Memory Debugging unified through matManager
 const OneDrivePhotos = require("./OneDrivePhotos.js");
 const { shuffle } = require("./shuffle.js");
 const { error_to_string } = require("./error_to_string.js");
@@ -87,6 +90,36 @@ const MINIMUM_SCAN_INTERVAL = 1000 * 60 * 10;
  */
 let oneDrivePhotosInstance = null;
 
+// CRASH DETECTION AND LOGGING
+process.on('SIGABRT', (signal) => {
+  console.error(`[NodeHelper] 🚨 SIGABRT detected - likely native memory corruption from OpenCV`);
+  const matStats = getMatStats();
+  console.error(`[NodeHelper] Active Mat objects: ${matStats.active}, Total created: ${matStats.total}`);
+  console.error(`[NodeHelper] Memory usage:`, process.memoryUsage());
+  process.exit(1);
+});
+
+process.on('SIGSEGV', (signal) => {
+  console.error(`[NodeHelper] 🚨 SIGSEGV detected - segmentation fault, likely OpenCV Mat access`);
+  const matStats = getMatStats();
+  console.error(`[NodeHelper] Active Mat objects: ${matStats.active}, Total created: ${matStats.total}`);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error(`[NodeHelper] 🚨 Uncaught Exception:`, error);
+  console.error(`[NodeHelper] Stack:`, error.stack);
+  const matStats = getMatStats();
+  console.error(`[NodeHelper] Active Mat objects: ${matStats.active}, Total created: ${matStats.total}`);
+});
+
+// Check if garbage collection is available
+if (global.gc) {
+  console.log("[NodeHelper] ✅ Garbage collection available");
+} else {
+  console.log("[NodeHelper] ❌ Garbage collection NOT available - consider starting with --expose-gc");
+}
+
 const nodeHelperObject = {
   /** @type {OneDriveMediaItem[]} */
   localPhotoList: [],
@@ -149,27 +182,42 @@ const nodeHelperObject = {
   },
 
   performFaceDetection: async function(imageBuffer, filename) {
-    console.log(`[NodeHelper] Face detection starting for: ${filename || 'unknown'}`);
+    console.log(`[NodeHelper] � Face detection starting for: ${filename || 'unknown'}`);
+    logMatMemory("BEFORE face detection");
     
     try {
       // Import the face detection module (dynamic import since it's optional)
       const { faceDetector } = await import('./src/vision/faceDetection.js');
       
+      // Track Mat objects before detection
+      const matStatsBefore = getMatStats();
+      
       // Only detect faces - no focal point calculation, no debug drawing
       const faces = await faceDetector.detectFacesOnly(imageBuffer);
-      console.log(`[NodeHelper] Face detection completed: found ${faces.length} faces`);
+      
+      // Check for Mat object leaks
+      const matStatsAfter = getMatStats();
+      if (matStatsAfter.active > matStatsBefore.active) {
+        console.warn(`[NodeHelper] ⚠️ Potential Mat leak: ${matStatsBefore.active} -> ${matStatsAfter.active} active objects`);
+      }
+      
+      logMatMemory("AFTER face detection");
+      console.log(`[NodeHelper] ✅ Face detection completed: found ${faces.length} faces`);
       
       return faces; // Just return array of face objects: [{ x, y, width, height, confidence }]
       
     } catch (error) {
-      console.error(`[NodeHelper] Face detection failed for ${filename || 'unknown'}:`, error.message);
+      console.error(`[NodeHelper] ❌ Face detection failed for ${filename || 'unknown'}:`, error.message);
+      console.error(`[NodeHelper] ❌ Face detection error stack:`, error.stack);
+      logMatMemory("AFTER face detection error");
       this.log_debug("Face detection failed:", error.message);
       return []; // Return empty array on failure
     }
   },
 
   findInterestingRectangle: async function(imageBuffer, filename) {
-    console.log(`[NodeHelper] Finding focal point for: ${filename || 'unknown'}`);
+    console.log(`[NodeHelper] 🎯 Finding focal point for: ${filename || 'unknown'}`);
+    logMatMemory("BEFORE focal point analysis");
     
     try {
       this.log_debug("Starting focal point analysis for:", filename);
@@ -184,8 +232,6 @@ const nodeHelperObject = {
         this.log_debug("Face detection failed:", faceError.message);
         // Continue with faces = [] (empty array)
       }
-      
-      const { faceDetector } = await import('./src/vision/faceDetection.js');
       
       let focalPoint = null;
       let method = 'none';
@@ -222,6 +268,8 @@ const nodeHelperObject = {
       // Step 3: If no faces, try interest detection
       if (!focalPoint) {
         console.log(`[NodeHelper] No faces found, trying interest detection...`);
+        const matStatsBeforeInterest = getMatStats();
+        
         try {
           // Import and use InterestDetector directly
           const InterestDetector = require('./src/vision/interestDetection.js');
@@ -238,8 +286,16 @@ const nodeHelperObject = {
             method = 'interest';
             console.log(`[NodeHelper] Interest-based focal point found`);
           }
+          
+          // Check for Mat leaks in interest detection
+          const matStatsAfterInterest = getMatStats();
+          if (matStatsAfterInterest.active > matStatsBeforeInterest.active) {
+            console.warn(`[NodeHelper] ⚠️ Interest detection Mat leak: ${matStatsBeforeInterest.active} -> ${matStatsAfterInterest.active} active objects`);
+          }
+          
         } catch (interestError) {
-          console.log(`[NodeHelper] Interest detection failed:`, interestError.message);
+          console.error(`[NodeHelper] Interest detection failed:`, interestError.message);
+          console.error(`[NodeHelper] Interest detection error stack:`, interestError.stack);
           this.log_debug("Interest detection failed:", interestError.message);
         }
       }
@@ -258,6 +314,7 @@ const nodeHelperObject = {
         method = 'default';
       }
       
+      logMatMemory("AFTER focal point analysis");
       console.log(`[NodeHelper] ✅ findInterestingRectangle completed: method=${method}`);
       this.log_debug(`Focal point analysis completed for ${filename}:`, {
         method: method,
@@ -273,13 +330,14 @@ const nodeHelperObject = {
     } catch (error) {
       console.error(`[NodeHelper] ❌ findInterestingRectangle failed for ${filename || 'unknown'}:`, error.message);
       console.error(`[NodeHelper] Error stack:`, error.stack);
+      logMatMemory("AFTER focal point error");
       this.log_debug("Focal point analysis failed, using fallback:", error.message);
       
       // Return default fallback on any error
       return {
         focalPoint: {
           x: 0.25,
-          y: 0.25, 
+          y: 0.25,
           width: 0.5,
           height: 0.5,
           type: 'default',
@@ -584,7 +642,9 @@ const nodeHelperObject = {
 
   processNextPhotoRequest: async function() {
     const startTime = Date.now();
-    console.log("[NodeHelper] 🔄 Processing photo request...");
+    const memBefore = process.memoryUsage();
+    console.log(`[NodeHelper] 🔄 Processing photo request... (Memory: ${Math.round(memBefore.heapUsed / 1024 / 1024)}MB heap, ${Math.round(memBefore.rss / 1024 / 1024)}MB RSS)`);
+    logMatMemory("BEFORE photo processing");
     
     if (!this.localPhotoList || this.localPhotoList.length === 0) {
       console.warn("[NodeHelper] ⚠ No photos available in list");
@@ -599,11 +659,31 @@ const nodeHelperObject = {
     try {
       await this.prepareShowPhoto({ photoId: photo.id });
 
+      // MEMORY MONITORING
+      const memAfter = process.memoryUsage();
+      const memDelta = memAfter.heapUsed - memBefore.heapUsed;
+      console.log(`[NodeHelper] 💾 Memory after processing: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB heap (${memDelta > 0 ? '+' : ''}${Math.round(memDelta / 1024 / 1024)}MB), RSS: ${Math.round(memAfter.rss / 1024 / 1024)}MB`);
+      
+      // CRASH PREVENTION - restart if memory too high
+      if (memAfter.heapUsed > 1000 * 1024 * 1024) { // 1GB threshold
+        console.error(`[NodeHelper] 🚨 Memory limit exceeded (${Math.round(memAfter.heapUsed / 1024 / 1024)}MB) - requesting restart to prevent crash`);
+        this.sendSocketNotification("ERROR", "Memory limit exceeded - please restart MagicMirror");
+        process.exit(1); // Force clean restart
+      }
+
       // FORCE GARBAGE COLLECTION after each photo
       if (global.gc) {
         global.gc();
-        console.log("[NodeHelper] 🗑️ Forced garbage collection");
+        global.gc(); // Double GC for more thorough cleanup
+        console.log("[NodeHelper] 🗑️ Double garbage collection forced");
+      } else {
+        // Alternative: Force memory pressure to trigger GC
+        const dummy = new Array(100000).fill(0); // Create pressure
+        dummy.length = 0; // Clear immediately
+        console.log("[NodeHelper] 🗑️ Memory pressure applied to trigger GC");
       }
+      
+      logMatMemory("AFTER photo processing & GC");
     
       // Advance to next photo for future requests
       this.uiPhotoIndex++;
@@ -617,6 +697,8 @@ const nodeHelperObject = {
       
     } catch (error) {
       console.error("[NodeHelper] ❌ Error processing photo:", error);
+      console.error("[NodeHelper] ❌ Stack trace:", error.stack);
+      logMatMemory("AFTER error in photo processing");
       this.sendSocketNotification("NO_PHOTO");
     }
   },

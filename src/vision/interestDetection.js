@@ -8,6 +8,7 @@
  */
 
 const cv = require('@u4/opencv4nodejs');
+const { trackMat, safeRelease, logMatMemory } = require('./matManager');
 
 class InterestDetector {
   
@@ -36,18 +37,6 @@ class InterestDetector {
     this.log = this.options.enableDebugLogs 
       ? (msg) => console.log(`[InterestDetection] ${msg}`)
       : () => {};
-  }
-  
-  safeRelease(matObject, objectName = 'Mat') {
-    if (matObject && typeof matObject.release === 'function') {
-      try {
-        matObject.release();
-        console.debug(`[FaceDetector] ✅ Released ${objectName}`);
-      } catch (releaseError) {
-        console.warn(`[FaceDetector] ⚠️  Failed to release ${objectName}:`, releaseError.message);
-        // Don't throw - just log the warning
-      }
-    }
   }
 
   /**
@@ -169,7 +158,7 @@ class InterestDetector {
       return null;
     } finally {
       // CRITICAL: Release Mat objects
-      this.safeRelease(workingImage, 'working image');
+      safeRelease(workingImage, 'working image');
     }
   }
   
@@ -223,7 +212,7 @@ class InterestDetector {
       return [];
     } finally {
       // Release gray image
-      this.safeRelease(gray, 'gray image');
+      safeRelease(gray, 'gray image');
     }
   }
   
@@ -275,7 +264,7 @@ class InterestDetector {
               continue;
             } finally {
               // CRITICAL: Release ROI Mat
-              this.safeRelease(roi, `Sliding window ROI`);
+              safeRelease(roi, `Sliding window ROI`);
             }
           }
         }
@@ -290,7 +279,7 @@ class InterestDetector {
       return [];
     } finally {
       // Release gray image
-      this.safeRelease(gray, 'gray image');
+      safeRelease(gray, 'gray image');
     }
   }
   
@@ -355,7 +344,7 @@ class InterestDetector {
       return [];
     } finally {
       // Release gray image
-      this.safeRelease(gray, 'gray image');
+      safeRelease(gray, 'gray image');
     }
   }
   
@@ -648,7 +637,7 @@ class InterestDetector {
       return null;
     } finally {
       // CRITICAL: Release the decoded image
-      this.safeRelease(image, 'decoded image');
+      safeRelease(image, 'decoded image');
     }
   }
 }
