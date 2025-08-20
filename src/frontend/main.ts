@@ -233,6 +233,34 @@ Module.register<Config>("MMM-OneDrive", {
     document.head.appendChild(styleElement);
   },
 
+  // ==================== BACKDROP STATIC ANIMATION ====================
+createStaticBackdropKeyframes: function(): void {
+  // Only create once
+  if (document.getElementById('backdrop-static')) return;
+  
+  const staticKeyframes = `
+    @keyframes backdrop-cycle {
+      0% {
+        opacity: 0;
+      }
+      10% {
+        opacity: 1;
+      }
+      90% {
+        opacity: 1;
+      }
+      100% {
+        opacity: 0;
+      }
+    }
+  `;
+  
+  const styleElement = document.createElement('style');
+  styleElement.id = 'backdrop-static';
+  styleElement.textContent = staticKeyframes;
+  document.head.appendChild(styleElement);
+},
+
   render: function (url: string, target: OneDriveMediaItem, album: DriveItem, focalPoint?: any) {
     if (this.suspended) {
       console.debug("[MMM-OneDrive] Module is suspended, skipping render");
@@ -244,6 +272,16 @@ Module.register<Config>("MMM-OneDrive", {
     current.textContent = "";
     back.style.backgroundImage = `url(${url})`;
     current.style.backgroundImage = `url(${url})`;
+
+    // Clear any existing animation
+    back.style.animation = 'none';
+    back.offsetHeight; // Force reflow
+    this.createStaticBackdropKeyframes();
+    // Apply backdrop fade animation
+    const totalDuration = this.config.updateInterval / 1000; // e.g., 30s
+    // Apply backdrop animation with proper 3-phase timing
+    back.style.animation = `backdrop-cycle ${totalDuration}s linear forwards`;
+  
     
     // ==================== LEFT MARGIN SUPPORT WITH CLIPPING WRAPPER ==================== 
     if (this.config.leftMargin) {
@@ -343,7 +381,7 @@ Module.register<Config>("MMM-OneDrive", {
   },
 
   applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, focalPoint?: any): void {
-    const totalDuration = (this.config.updateInterval/1000) + 2; // Add 2 seconds for fade in + out
+    const totalDuration = (this.config.updateInterval/1000); 
     
     // Ensure static keyframes exist
     this.createStaticKenBurnsKeyframes();

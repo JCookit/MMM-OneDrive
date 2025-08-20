@@ -39,11 +39,6 @@
   bottom: 10px;
 }
 
-#ONEDRIVE_PHOTO_CURRENT.animated {
-  animation-name: trans;
-  animation-duration: 2s;
-}
-
 #ONEDRIVE_PHOTO_BACKDROP {
   background-size: cover;
   background-repeat: no-repeat;

@@ -937,7 +937,7 @@ const nodeHelperObject = {
         interestingRectangleResult // Include face detection results
       });
     } catch (err) {
-      this.socketNotificationReceived("NO_PHOTO");  // prime the pump for the UX asking again
+      this.sendSocketNotification("NO_PHOTO");  // prime the pump for the UX asking again
       if (err instanceof FetchHTTPError) {
         // silently skip the error
         return;
