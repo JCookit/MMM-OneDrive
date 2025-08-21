@@ -10,11 +10,14 @@ The face detection feature will:
 4. Log processing times and detection results for performance monitoring
 
 Configuration options for face detection:
-- enabled: Enable/disable face detection (default: true)
+- enabled: Enable/disable face detection (default: true, set to false for animation-only testing)
 - minFaceSize: Minimum face size in pixels (default: 50)
 - maxFaceSize: Maximum face size in pixels (default: 300) 
 - confidenceThreshold: Detection confidence threshold 0-1 (default: 0.5)
 - debugMode: Save debug images with face detection rectangles (default: false)
+
+Note: Setting enabled: false will skip all OpenCV processing and use center focal points,
+useful for testing Ken Burns animations without the computational overhead of face detection.
 
 */
 

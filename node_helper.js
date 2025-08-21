@@ -217,6 +217,27 @@ const nodeHelperObject = {
 
   findInterestingRectangle: async function(imageBuffer, filename) {
     console.log(`[NodeHelper] 🎯 Finding focal point for: ${filename || 'unknown'}`);
+    
+    // Check if face detection is disabled in config (defaults to enabled if not specified)
+    const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
+    console.log(`[NodeHelper] Face detection enabled: ${faceDetectionEnabled}`);
+    
+    if (!faceDetectionEnabled) {
+      console.log(`[NodeHelper] 🎬 Face detection disabled in config - using center focal point`);
+      return {
+        focalPoint: {
+          x: 0.25,        // 25% from left (start of center crop area)
+          y: 0.25,        // 25% from top (start of center crop area)  
+          width: 0.5,     // 50% width (center half of image)
+          height: 0.5,    // 50% height (center half of image)
+          type: 'center_fallback',
+          method: 'face_detection_disabled'
+        },
+        method: 'face_detection_disabled',
+        faces: []
+      };
+    }
+    
     logMatMemory("BEFORE focal point analysis");
     
     try {
