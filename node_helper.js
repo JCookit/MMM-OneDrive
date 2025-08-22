@@ -23,7 +23,7 @@ const { error_to_string } = require("./error_to_string.js");
 const { cachePath } = require("./msal/authConfig.js");
 const { convertHEIC } = require("./photosConverter-node");
 const { fetchToUint8Array, FetchHTTPError } = require("./fetchItem-node");
-const { createIntervalRunner } = require("./src/interval-runner");
+
 
 /**
  * Simple reverse geocoding using OpenStreetMap Nominatim API
@@ -369,73 +369,6 @@ const nodeHelperObject = {
       };
     }
   },
-
-  // analyzeFaceDetection: async function(payload) {
-  //   const { url, photo, album, filename } = payload;
-    
-  //   try {
-  //     this.log_debug("Starting face detection analysis for:", filename);
-      
-  //     // Import the face detection module (dynamic import since it's optional)
-  //     const { faceDetector } = await import('./src/vision/faceDetection.js');
-      
-  //     // Use the cache directory (not the token file path)
-  //     const cacheDir = path.join(__dirname, 'cache');
-  //     const tempDir = path.join(cacheDir, 'temp');
-  //     if (!fs.existsSync(tempDir)) {
-  //       await mkdir(tempDir, { recursive: true });
-  //     }
-      
-  //     // Extract base64 data from data URL
-  //     const base64Data = url.replace(/^data:image\/[a-z]+;base64,/, '');
-  //     const tempFilePath = path.join(tempDir, `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`);
-      
-  //     // Write base64 data to file
-  //     await writeFile(tempFilePath, base64Data, 'base64');
-      
-  //     // Analyze image for faces
-  //     const faceDetectionResult = await faceDetector.detectFaces(tempFilePath, false); // Don't need debug mode
-      
-  //     // Convert marked image buffer to data URL if available
-  //     let markedImageUrl = url; // Default to original
-  //     if (faceDetectionResult.markedImageBuffer) {
-  //       const markedImageBase64 = faceDetectionResult.markedImageBuffer.toString('base64');
-  //       markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
-  //     }
-      
-  //     // Clean up temp file
-  //     try {
-  //       await fs.promises.unlink(tempFilePath);
-  //     } catch (cleanupError) {
-  //       this.log_debug("Failed to clean up temp file:", cleanupError.message);
-  //     }
-      
-  //     // // Send result back to frontend with marked image
-  //     // this.sendSocketNotification("FACE_DETECTION_RESULT", {
-  //     //   url: markedImageUrl, // Use marked image instead of original
-  //     //   photo,
-  //     //   album,
-  //     //   faceDetectionResult
-  //     // });
-      
-  //   } catch (error) {
-  //     this.log_error("Face detection analysis failed:", error);
-      
-  //     // Send fallback result to frontend so it can proceed with random Ken Burns
-  //     // this.sendSocketNotification("FACE_DETECTION_RESULT", {
-  //     //   url,
-  //     //   photo,
-  //     //   album,
-  //     //   faceDetectionResult: {
-  //     //     faceCount: 0,
-  //     //     faces: [],
-  //     //     focalPoint: null,
-  //     //     processingTime: 0,
-  //     //     error: error.message
-  //     //   }
-  //     // });
-  //   }
-  // },
 
   log_debug: function (...args) {
     Log.debug(`[${this.name}] [node_helper]`, ...args);
