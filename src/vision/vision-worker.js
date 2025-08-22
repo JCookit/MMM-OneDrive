@@ -147,7 +147,7 @@ class VisionWorker {
   async handleMessage(message) {
     const { type, requestId } = message;
     
-    console.log(`[VisionWorker] Received message: ${type} (${requestId})`);
+    console.debug(`[VisionWorker] Received message: ${type} (${requestId})`);
     
     switch (type) {
       case 'PROCESS_IMAGE':
@@ -191,7 +191,7 @@ class VisionWorker {
     const startTime = Date.now();
     
     try {
-      console.log(`[VisionWorker] 🎯 Starting complete image processing for: ${filename || 'unknown'}`);
+      console.debug(`[VisionWorker] 🎯 Starting complete image processing for: ${filename || 'unknown'}`);
       logMatMemory("BEFORE vision processing (worker)");
       
       // Update config if provided
@@ -200,7 +200,7 @@ class VisionWorker {
       }
       
       const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
-      console.log(`[VisionWorker] Face detection enabled: ${faceDetectionEnabled}`);
+      console.debug(`[VisionWorker] Face detection enabled: ${faceDetectionEnabled}`);
       
       let result;
       
@@ -276,7 +276,7 @@ class VisionWorker {
    * Implements the full logic from findInterestingRectangleFallback
    */
   async performCompleteVisionProcessing(imageBuffer, filename) {
-    console.log(`[VisionWorker] 🔄 Starting complete vision pipeline for ${filename || 'unknown'}`);
+    console.debug(`[VisionWorker] 🔄 Starting complete vision pipeline for ${filename || 'unknown'}`);
     
     if (!this.isInitialized || !this.faceDetector || !this.interestDetector) {
       throw new Error('Vision processors not initialized');
@@ -288,9 +288,9 @@ class VisionWorker {
     
     // Step 1: Try face detection first
     try {
-      console.log(`[VisionWorker] Step 1: Attempting face detection...`);
+      console.debug(`[VisionWorker] Step 1: Attempting face detection...`);
       faces = await this.faceDetector.detectFacesOnly(imageBuffer);
-      console.log(`[VisionWorker] Face detection found ${faces.length} faces`);
+      console.debug(`[VisionWorker] Face detection found ${faces.length} faces`);
     } catch (faceError) {
       console.warn(`[VisionWorker] Face detection failed:`, faceError.message);
       // Continue with faces = [] (empty array)
@@ -298,7 +298,7 @@ class VisionWorker {
     
     // Step 2: If faces found, create focal point from faces
     if (faces.length > 0) {
-      console.log(`[VisionWorker] Step 2: Creating focal point from ${faces.length} face(s)`);
+      console.debug(`[VisionWorker] Step 2: Creating focal point from ${faces.length} face(s)`);
       
       // Find bounding box that contains all faces  
       const minX = Math.min(...faces.map(f => f.x));
@@ -322,12 +322,12 @@ class VisionWorker {
         method: 'all_faces_bounding_box'
       };
       method = 'faces';
-      console.log(`[VisionWorker] Face-based focal point created for ${faces.length} faces`);
+      console.info(`[VisionWorker] Face-based focal point created for ${faces.length} faces`);
     }
     
     // Step 3: If no faces, try interest detection  
     if (!focalPoint) {
-      console.log(`[VisionWorker] Step 3: No faces found, trying interest detection...`);
+      console.debug(`[VisionWorker] Step 3: No faces found, trying interest detection...`);
       const matStatsBeforeInterest = getMatStats();
       
       try {
@@ -336,7 +336,7 @@ class VisionWorker {
         if (interestResult && interestResult.focalPoint) {
           focalPoint = interestResult.focalPoint;
           method = 'interest';
-          console.log(`[VisionWorker] Interest-based focal point found`);
+          console.info(`[VisionWorker] Interest-based focal point found`);
         }
         
         // Check for Mat leaks in interest detection
@@ -353,7 +353,7 @@ class VisionWorker {
     
     // Step 4: Default fallback - center crop
     if (!focalPoint) {
-      console.log(`[VisionWorker] Step 4: No focal point found, using default center`);
+      console.debug(`[VisionWorker] Step 4: No focal point found, using default center`);
       focalPoint = {
         x: 0.25,
         y: 0.25,
@@ -371,9 +371,9 @@ class VisionWorker {
     let debugImageBase64 = null;
     if (this.config?.debugMode) {
       try {
-        console.log(`[VisionWorker] Creating debug image for ${filename || 'unknown'} (${faces.length} faces)`);
+        console.debug(`[VisionWorker] Creating debug image for ${filename || 'unknown'} (${faces.length} faces)`);
         debugImageBase64 = await this.createDebugImage(imageBuffer, faces, focalPoint);
-        console.log(`[VisionWorker] Debug image created successfully`);
+        console.debug(`[VisionWorker] Debug image created successfully`);
       } catch (debugError) {
         console.warn(`[VisionWorker] Debug image creation failed:`, debugError.message);
       }
@@ -398,6 +398,11 @@ class VisionWorker {
     let debugImage = null;
     
     try {
+      // Handle IPC serialized buffers
+      if (imageBuffer && typeof imageBuffer === 'object' && imageBuffer.type === 'Buffer' && Array.isArray(imageBuffer.data)) {
+        imageBuffer = Buffer.from(imageBuffer.data);
+      }
+      
       // Load image using Sharp first for EXIF handling
       const sharp = require('sharp');
       const processedBuffer = await sharp(imageBuffer)

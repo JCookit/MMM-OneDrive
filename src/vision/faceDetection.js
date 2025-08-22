@@ -94,7 +94,7 @@ class FaceDetector {
         throw new Error('Invalid image for YOLO processing');
       }
       
-      console.log(`[FaceDetector] Creating YOLO blob ${inputSize}x${inputSize}...`);
+      console.debug(`[FaceDetector] Creating YOLO blob ${inputSize}x${inputSize}...`);
       blob = cv.blobFromImage(
         image, 
         1.0 / 255.0,  // Scale to [0,1]
@@ -104,14 +104,14 @@ class FaceDetector {
         false  // crop
       );
       trackMat(blob, 'YOLO blob');
-      console.log(`[FaceDetector] YOLO blob created successfully`);
+      console.debug(`[FaceDetector] YOLO blob created successfully`);
 
       // Run inference with additional safety
-      console.log(`[FaceDetector] Running YOLO inference...`);
+      console.debug(`[FaceDetector] Running YOLO inference...`);
       this.yoloNet.setInput(blob);
       outputs = this.yoloNet.forward();
       trackMat(outputs, 'YOLO outputs');
-      console.log(`[FaceDetector] YOLO inference completed`);
+      console.debug(`[FaceDetector] YOLO inference completed`);
       
       // Process YOLO detections
       const rawDetections = this.processYoloDetections(outputs, image.cols, image.rows, inputSize);
@@ -344,7 +344,7 @@ class FaceDetector {
     });
     
     if (sizeFilteredFaces.length < faces.length) {
-      console.log(`[FaceDetector] Filtered out ${faces.length - sizeFilteredFaces.length} small faces (keeping ${sizeFilteredFaces.length})`);
+      console.debug(`[FaceDetector] Filtered out ${faces.length - sizeFilteredFaces.length} small faces (keeping ${sizeFilteredFaces.length})`);
     }
     return sizeFilteredFaces;
   }
@@ -360,7 +360,7 @@ class FaceDetector {
     
     try {
       // Debug buffer information
-      console.log(`[FaceDetector] Loading image from buffer: length=${imageBuffer?.length}, type=${typeof imageBuffer}, isBuffer=${Buffer.isBuffer(imageBuffer)}`);
+      console.debug(`[FaceDetector] Loading image from buffer: length=${imageBuffer?.length}, type=${typeof imageBuffer}, isBuffer=${Buffer.isBuffer(imageBuffer)}`);
       
       if (!imageBuffer) {
         throw new Error('No image buffer provided');

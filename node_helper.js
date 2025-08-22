@@ -159,6 +159,116 @@ const nodeHelperObject = {
     }
   },
 
+  /**
+   * Parse and route vision worker log messages to appropriate console methods
+   * @param {string} logLine - Raw log line from vision worker
+   */
+  routeWorkerLogMessage: function(logLine) {
+    // Extract log level from worker message patterns
+    // Look for console.debug, console.log, console.warn, console.error patterns
+    
+    // Handle stderr messages - these are usually errors or important warnings
+    if (logLine.includes('[STDERR]')) {
+      // Still check for debug patterns in stderr (some debugging might go to stderr)
+      if (logLine.includes('📊 Mat created') || 
+          logLine.includes('🗑️ Mat released') || 
+          logLine.includes('💾 Memory stats')) {
+        console.debug(`[Vision Worker] ${logLine}`);
+        return;
+      }
+      // Most stderr messages should be errors or warnings
+      console.error(`[Vision Worker] ${logLine}`);
+      return;
+    }
+    
+    // Check WARNING and ERROR patterns FIRST (higher priority than debug)
+    
+    // Error level patterns (actual errors and failures)
+    if (logLine.includes('❌') || 
+        logLine.includes('ERROR') || 
+        logLine.includes('Error:') ||
+        logLine.includes('Failed to') ||
+        logLine.includes('Uncaught exception') ||
+        logLine.includes('Unhandled rejection') ||
+        logLine.includes('initialization failed') ||
+        logLine.includes('processing failed')) {
+      console.error(`[Vision Worker] ${logLine}`);
+      return;
+    }
+    
+    // Warning level patterns (important issues but not errors)
+    if (logLine.includes('⚠️') || 
+        logLine.includes('🚨') ||
+        logLine.includes('Warning:') ||
+        logLine.includes('WARN') ||
+        logLine.includes('Mat leak') ||
+        logLine.includes('Debug image creation failed')) {
+      console.warn(`[Vision Worker] ${logLine}`);
+      return;
+    }
+    
+    // Debug level patterns (most verbose processing details) - checked AFTER warnings/errors
+    if (logLine.includes('📊 Mat created') || 
+        logLine.includes('🗑️ Mat released') || 
+        logLine.includes('⏭️ Mat already released') || 
+        logLine.includes('💾 Memory stats') ||
+        logLine.includes('Creating YOLO blob') ||
+        logLine.includes('YOLO blob created successfully') ||
+        logLine.includes('Running YOLO inference') ||
+        logLine.includes('YOLO inference completed') ||
+        logLine.includes('YOLO found') ||
+        logLine.includes('Filtered out') ||
+        logLine.includes('Loading image from buffer') ||
+        logLine.includes('Converted serialized buffer') ||
+        logLine.includes('Received message:') ||
+        logLine.includes('🎯 Starting complete image processing') ||
+        logLine.includes('Face detection enabled:') ||
+        logLine.includes('🔄 Starting complete vision pipeline') ||
+        logLine.includes('Step 1: Attempting face detection') ||
+        logLine.includes('Face detection found') ||
+        logLine.includes('Step 2: Creating focal point') ||
+        logLine.includes('Face-based focal point created') ||
+        logLine.includes('Step 3: No faces found') ||
+        logLine.includes('Step 4: No focal point found') ||
+        logLine.includes('Interest-based focal point found') ||
+        logLine.includes('Creating debug image') ||
+        logLine.includes('Debug image created successfully') ||
+        logLine.includes('🧹 Emergency cleanup completed') ||
+        logLine.includes('[FaceDetector]') && (
+          logLine.includes('Creating') ||
+          logLine.includes('blob created') ||
+          logLine.includes('Running') ||
+          logLine.includes('inference completed') ||
+          logLine.includes('found') && logLine.includes('faces') ||
+          logLine.includes('Filtered') ||
+          logLine.includes('Loading image') ||
+          logLine.includes('already released')
+        ) ||
+        // MatManager debug messages (only those without warning/error symbols)
+        logLine.includes('[MatManager]') && (
+          logLine.includes('📊') ||
+          logLine.includes('🗑️') ||
+          logLine.includes('⏭️') ||
+          logLine.includes('💾') ||
+          logLine.includes('🧹')
+        ) ||
+        logLine.includes('[VisionWorker]') && (
+          logLine.includes('Received message') ||
+          logLine.includes('Starting complete') ||
+          logLine.includes('Face detection enabled') ||
+          logLine.includes('Starting complete vision') ||
+          logLine.includes('Step ') ||
+          logLine.includes('focal point') ||
+          logLine.includes('debug image')
+        )) {
+      console.debug(`[Vision Worker] ${logLine}`);
+      return;
+    }
+    
+    // Default to regular log for everything else (startup messages, results, etc.)
+    console.log(`[Vision Worker] ${logLine}`);
+  },
+
   // ==================== VISION WORKER PROCESS MANAGEMENT ====================
 
   initializeVisionWorker: function() {
@@ -178,7 +288,7 @@ const nodeHelperObject = {
       const lines = data.toString().trim().split('\n');
       lines.forEach(line => {
         if (line.trim()) {
-          console.log(`[Vision Worker] ${line}`);
+          this.routeWorkerLogMessage(line);
         }
       });
     });
@@ -188,7 +298,9 @@ const nodeHelperObject = {
       const lines = data.toString().trim().split('\n');
       lines.forEach(line => {
         if (line.trim()) {
-          console.error(`[Vision Worker ERROR] ${line}`);
+          // Route stderr messages through the same smart routing
+          // but prefix them to indicate they came from stderr
+          this.routeWorkerLogMessage(`[STDERR] ${line}`);
         }
       });
     });
@@ -244,6 +356,8 @@ const nodeHelperObject = {
       
       case 'FACE_DETECTION_RESULT':
       case 'FACE_DETECTION_ERROR':
+      case 'PROCESSING_RESULT':
+      case 'ERROR':
         this.handleVisionWorkerResponse(message);
         break;
       

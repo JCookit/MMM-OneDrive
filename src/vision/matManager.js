@@ -16,7 +16,7 @@ function trackMat(mat, context) {
   if (mat && mat.rows && mat.cols) {
     activeMatObjects.add(mat);
     totalMatObjectsCreated++;
-    console.log(`[MatManager] 📊 Mat created (${context}): ${activeMatObjects.size} active, ${totalMatObjectsCreated} total`);
+    console.debug(`[MatManager] 📊 Mat created (${context}): ${activeMatObjects.size} active, ${totalMatObjectsCreated} total`);
   }
   return mat;
 }
@@ -29,10 +29,10 @@ function safeRelease(mat, context) {
     if (mat && mat.rows && mat.cols && !mat.empty) {
       mat.release();
       activeMatObjects.delete(mat);
-      console.log(`[MatManager] 🗑️ Mat released (${context}): ${activeMatObjects.size} active remaining`);
+      console.debug(`[MatManager] 🗑️ Mat released (${context}): ${activeMatObjects.size} active remaining`);
       return true;
     } else {
-      console.log(`[MatManager] ⏭️ Mat already released or invalid (${context})`);
+      console.debug(`[MatManager] ⏭️ Mat already released or invalid (${context})`);
       return false;
     }
   } catch (error) {
@@ -72,7 +72,7 @@ function forceCleanup() {
   }
   
   activeMatObjects.clear();
-  console.log(`[MatManager] 🧹 Emergency cleanup completed: ${cleanedCount} Mat objects released`);
+  console.debug(`[MatManager] 🧹 Emergency cleanup completed: ${cleanedCount} Mat objects released`);
 }
 
 /**
@@ -81,7 +81,7 @@ function forceCleanup() {
 function logMatMemory(context) {
   const stats = getMatStats();
   const memUsage = process.memoryUsage();
-  console.log(`[MatManager] 💾 Memory stats (${context}): ${stats.active} active Mats, ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB heap`);
+  console.debug(`[MatManager] 💾 Memory stats (${context}): ${stats.active} active Mats, ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB heap`);
 }
 
 module.exports = {
