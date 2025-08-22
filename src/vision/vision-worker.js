@@ -16,6 +16,9 @@
 
 const path = require('path');
 
+// Import OpenCV and utilities
+const cv = require('@u4/opencv4nodejs');
+
 // Import vision processing modules  
 const { FaceDetector } = require('./faceDetection');
 const InterestDetector = require('./interestDetection');
@@ -364,11 +367,123 @@ class VisionWorker {
     
     console.log(`[VisionWorker] ✅ Complete vision processing completed: method=${method}`);
     
+    // Step 5: Create debug image if requested
+    let debugImageBase64 = null;
+    if (this.config?.debugMode) {
+      try {
+        console.log(`[VisionWorker] Creating debug image for ${filename || 'unknown'} (${faces.length} faces)`);
+        debugImageBase64 = await this.createDebugImage(imageBuffer, faces, focalPoint);
+        console.log(`[VisionWorker] Debug image created successfully`);
+      } catch (debugError) {
+        console.warn(`[VisionWorker] Debug image creation failed:`, debugError.message);
+      }
+    }
+    
     return {
       focalPoint,
       method,
-      faces
+      faces,
+      debugImageBase64
     };
+  }
+
+  /**
+   * Create debug image with face boxes and focal point overlay
+   * @param {Buffer} imageBuffer - Original image buffer
+   * @param {Array} faces - Array of face detection results
+   * @param {Object} focalPoint - Focal point object
+   * @returns {Promise<string>} Base64 encoded debug image
+   */
+  async createDebugImage(imageBuffer, faces, focalPoint) {
+    let debugImage = null;
+    
+    try {
+      // Load image using Sharp first for EXIF handling
+      const sharp = require('sharp');
+      const processedBuffer = await sharp(imageBuffer)
+        .rotate() // Handle EXIF orientation
+        .jpeg({ quality: 95 })
+        .toBuffer();
+      
+      // Convert to OpenCV Mat
+      debugImage = cv.imdecode(processedBuffer);
+      trackMat(debugImage, 'debug image');
+      
+      // Draw face rectangles in green
+      faces.forEach((face, index) => {
+        const topLeft = new cv.Point2(face.x, face.y);
+        const bottomRight = new cv.Point2(face.x + face.width, face.y + face.height);
+        
+        // Green rectangle for faces
+        debugImage.drawRectangle(topLeft, bottomRight, new cv.Vec3(0, 255, 0), 3);
+        
+        // Add face index label
+        const labelPos = new cv.Point2(face.x, face.y - 10);
+        debugImage.putText(
+          `Face ${index + 1}`,
+          labelPos,
+          cv.FONT_HERSHEY_SIMPLEX,
+          0.7,
+          new cv.Vec3(0, 255, 0),
+          2
+        );
+      });
+      
+      // Draw focal point rectangle in blue
+      if (focalPoint && typeof focalPoint.x === 'number') {
+        let fpX, fpY, fpWidth, fpHeight;
+        
+        if (focalPoint.x <= 1 && focalPoint.y <= 1) {
+          // Normalized coordinates (0-1)
+          fpX = Math.round(focalPoint.x * debugImage.cols);
+          fpY = Math.round(focalPoint.y * debugImage.rows);
+          fpWidth = Math.round(focalPoint.width * debugImage.cols);
+          fpHeight = Math.round(focalPoint.height * debugImage.rows);
+        } else {
+          // Absolute pixel coordinates
+          fpX = focalPoint.x;
+          fpY = focalPoint.y;
+          fpWidth = focalPoint.width;
+          fpHeight = focalPoint.height;
+        }
+        
+        const fpTopLeft = new cv.Point2(fpX, fpY);
+        const fpBottomRight = new cv.Point2(fpX + fpWidth, fpY + fpHeight);
+        
+        // Blue rectangle for focal point
+        debugImage.drawRectangle(fpTopLeft, fpBottomRight, new cv.Vec3(255, 0, 0), 2);
+        
+        // Add focal point label
+        const fpLabelPos = new cv.Point2(fpX, fpY - 10);
+        debugImage.putText(
+          `Focal (${focalPoint.method || 'unknown'})`,
+          fpLabelPos,
+          cv.FONT_HERSHEY_SIMPLEX,
+          0.6,
+          new cv.Vec3(255, 0, 0),
+          2
+        );
+      }
+      
+      // Encode to JPEG buffer
+      const encodedBuffer = cv.imencode('.jpg', debugImage);
+      
+      // Convert to base64
+      const base64String = encodedBuffer.toString('base64');
+      
+      // Cleanup
+      safeRelease(debugImage, 'debug image');
+      
+      return base64String;
+      
+    } catch (error) {
+      console.error(`[VisionWorker] Debug image creation error:`, error.message);
+      
+      // Cleanup on error
+      safeRelease(debugImage, 'debug image (error cleanup)');
+      
+      throw error;
+    }
   }
 
   handleConfigUpdate(message) {
@@ -432,6 +547,16 @@ class VisionWorker {
       timestamp: Date.now()
     });
   }
+
+  /**
+   * Shutdown method for testing
+   */
+  async shutdown() {
+    console.log('[VisionWorker] Shutting down...');
+    this.isInitialized = false;
+    // In a real scenario this would terminate the process, 
+    // but for testing we just mark as shutdown
+  }
 }
 
 // Support standalone mode for testing
@@ -466,3 +591,6 @@ process.on('exit', (code) => {
 });
 
 console.log(`[VisionWorker] Vision worker process started with PID: ${process.pid}`);
+
+// Export the class for testing purposes
+module.exports = VisionWorker;

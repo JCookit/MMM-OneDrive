@@ -90,36 +90,6 @@ const MINIMUM_SCAN_INTERVAL = 1000 * 60 * 10;
  */
 let oneDrivePhotosInstance = null;
 
-// CRASH DETECTION AND LOGGING
-process.on('SIGABRT', (signal) => {
-  console.error(`[NodeHelper] 🚨 SIGABRT detected - likely native memory corruption from OpenCV`);
-  const matStats = getMatStats();
-  console.error(`[NodeHelper] Active Mat objects: ${matStats.active}, Total created: ${matStats.total}`);
-  console.error(`[NodeHelper] Memory usage:`, process.memoryUsage());
-  process.exit(1);
-});
-
-process.on('SIGSEGV', (signal) => {
-  console.error(`[NodeHelper] 🚨 SIGSEGV detected - segmentation fault, likely OpenCV Mat access`);
-  const matStats = getMatStats();
-  console.error(`[NodeHelper] Active Mat objects: ${matStats.active}, Total created: ${matStats.total}`);
-  process.exit(1);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error(`[NodeHelper] 🚨 Uncaught Exception:`, error);
-  console.error(`[NodeHelper] Stack:`, error.stack);
-  const matStats = getMatStats();
-  console.error(`[NodeHelper] Active Mat objects: ${matStats.active}, Total created: ${matStats.total}`);
-});
-
-// Check if garbage collection is available
-if (global.gc) {
-  console.log("[NodeHelper] ✅ Garbage collection available");
-} else {
-  console.log("[NodeHelper] ❌ Garbage collection NOT available - consider starting with --expose-gc");
-}
-
 const nodeHelperObject = {
   /** @type {OneDriveMediaItem[]} */
   localPhotoList: [],
@@ -377,7 +347,8 @@ const nodeHelperObject = {
           imageBuffer: imageBuffer,
           filename: filename,
           config: {
-            faceDetection: { enabled: faceDetectionEnabled }
+            faceDetection: { enabled: faceDetectionEnabled },
+            debugMode: this.config?.faceDetection?.debugMode || false
           }
         });
         
@@ -677,9 +648,7 @@ const nodeHelperObject = {
 
   processNextPhotoRequest: async function() {
     const startTime = Date.now();
-    const memBefore = process.memoryUsage();
-    console.log(`[NodeHelper] 🔄 Processing photo request... (Memory: ${Math.round(memBefore.heapUsed / 1024 / 1024)}MB heap, ${Math.round(memBefore.rss / 1024 / 1024)}MB RSS)`);
-    logMatMemory("BEFORE photo processing");
+    console.log(`[NodeHelper] 🔄 Processing photo request... `);
     
     if (!this.localPhotoList || this.localPhotoList.length === 0) {
       console.warn("[NodeHelper] ⚠ No photos available in list");
@@ -694,31 +663,7 @@ const nodeHelperObject = {
     try {
       await this.prepareShowPhoto({ photoId: photo.id });
 
-      // MEMORY MONITORING
-      const memAfter = process.memoryUsage();
-      const memDelta = memAfter.heapUsed - memBefore.heapUsed;
-      console.log(`[NodeHelper] 💾 Memory after processing: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB heap (${memDelta > 0 ? '+' : ''}${Math.round(memDelta / 1024 / 1024)}MB), RSS: ${Math.round(memAfter.rss / 1024 / 1024)}MB`);
-      
-      // CRASH PREVENTION - restart if memory too high
-      if (memAfter.heapUsed > 1000 * 1024 * 1024) { // 1GB threshold
-        console.error(`[NodeHelper] 🚨 Memory limit exceeded (${Math.round(memAfter.heapUsed / 1024 / 1024)}MB) - requesting restart to prevent crash`);
-        this.sendSocketNotification("ERROR", "Memory limit exceeded - please restart MagicMirror");
-        process.exit(1); // Force clean restart
-      }
-
-      // FORCE GARBAGE COLLECTION after each photo
-      if (global.gc) {
-        global.gc();
-        global.gc(); // Double GC for more thorough cleanup
-        console.log("[NodeHelper] 🗑️ Double garbage collection forced");
-      } else {
-        // Alternative: Force memory pressure to trigger GC
-        const dummy = new Array(1000000).fill(0); // Create pressure
-        dummy.length = 0; // Clear immediately
-        console.log("[NodeHelper] 🗑️ Memory pressure applied to trigger GC");
-      }
-      
-      logMatMemory("AFTER photo processing & GC");
+      console.log("[NodeHelper] ✅ Photo processed successfully");
     
       // Advance to next photo for future requests
       this.uiPhotoIndex++;
@@ -733,7 +678,6 @@ const nodeHelperObject = {
     } catch (error) {
       console.error("[NodeHelper] ❌ Error processing photo:", error);
       console.error("[NodeHelper] ❌ Stack trace:", error.stack);
-      logMatMemory("AFTER error in photo processing");
       this.sendSocketNotification("NO_PHOTO");
     }
   },
@@ -952,9 +896,6 @@ const nodeHelperObject = {
 
   prepareShowPhoto: async function ({ photoId }) {
 
-    // Log memory usage before processing
-    const memBefore = process.memoryUsage();
-    
     const photo = this.localPhotoList.find((p) => p.id === photoId);
     if (!photo) {
       this.log_error(`Photo with id ${photoId} not found in local list`);
@@ -1026,29 +967,11 @@ const nodeHelperObject = {
       if (this.config.kenBurnsEffect !== false && photo.filename) {
         interestingRectangleResult = await this.findInterestingRectangle(buffer, photo.filename);
         
-        // Generate debug image if requested (using all rectangle information)
-        if (this.config?.faceDetection?.debugMode && interestingRectangleResult) {
-          try {
-            console.log(`[NodeHelper] Creating debug image for ${photo.filename} (${interestingRectangleResult.faces.length} faces)`);
-            
-            const { debugImageCreator } = await import('./src/vision/debugUtils.js');
-            const debugResult = await debugImageCreator.createDebugImage(
-              buffer, 
-              interestingRectangleResult.faces, 
-              interestingRectangleResult.focalPoint
-            );
-            
-            if (debugResult && debugResult.markedImageBuffer) {
-              const markedImageBase64 = debugResult.markedImageBuffer.toString('base64');
-              interestingRectangleResult.markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
-              console.log(`[NodeHelper] Debug image created successfully`);
-              this.log_debug(`Debug image created for ${photo.filename}`);
-            }
-          } catch (debugError) {
-            console.log(`[NodeHelper] ⚠️  Debug image creation failed:`, debugError.message);
-            this.log_debug("Debug image creation failed:", debugError.message);
-            interestingRectangleResult.markedImageUrl = null;
-          }
+        // Debug image is now created by vision worker (if debugMode enabled)
+        if (this.config?.faceDetection?.debugMode && interestingRectangleResult?.debugImageBase64) {
+          interestingRectangleResult.markedImageUrl = `data:image/jpeg;base64,${interestingRectangleResult.debugImageBase64}`;
+          console.log(`[NodeHelper] Debug image received from vision worker for ${photo.filename}`);
+          this.log_debug(`Debug image received for ${photo.filename}`);
         }
       }
 
@@ -1069,10 +992,6 @@ const nodeHelperObject = {
         interestingRectangleResult.markedImageBuffer = null;
       }
       
-      // Log memory usage after processing
-      const memAfter = process.memoryUsage();
-      console.log(`[NodeHelper] 💾 Memory after photo processing: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB heap (+${Math.round((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024)}MB)`);
-
     } catch (err) {
       this.sendSocketNotification("NO_PHOTO");  // prime the pump for the UX asking again
       if (err instanceof FetchHTTPError) {
