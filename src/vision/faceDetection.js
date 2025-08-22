@@ -56,7 +56,7 @@ class FaceDetector {
     if (this.method === 'yolo') {
       try {
         console.log('[FaceDetector] Loading YOLOv8-face model...');
-        const yoloModelPath = path.join(__dirname, '..', '..', 'models', 'yolo', 'yolov8n-face.onnx');
+        const yoloModelPath = path.join(__dirname, 'models', 'yolo', 'yolov8n-face.onnx');
         
         // Verify YOLO model exists
         const fs = require('fs');
@@ -356,29 +356,60 @@ class FaceDetector {
    * @returns {Promise<cv.Mat>} OpenCV Mat object
    */
   async loadImageFromBuffer(imageBuffer) {
+    let cvImage = null;
+    
     try {
+      // Debug buffer information
+      console.log(`[FaceDetector] Loading image from buffer: length=${imageBuffer?.length}, type=${typeof imageBuffer}, isBuffer=${Buffer.isBuffer(imageBuffer)}`);
+      
+      if (!imageBuffer) {
+        throw new Error('No image buffer provided');
+      }
+      
+      // Convert to Buffer if needed (IPC might serialize it differently)
+      let buffer = imageBuffer;
+      if (!Buffer.isBuffer(imageBuffer)) {
+        if (imageBuffer.type === 'Buffer' && Array.isArray(imageBuffer.data)) {
+          // Handle Node.js buffer serialization from IPC
+          buffer = Buffer.from(imageBuffer.data);
+          console.log(`[FaceDetector] Converted serialized buffer: ${buffer.length} bytes`);
+        } else {
+          throw new Error(`Invalid buffer type: ${typeof imageBuffer}, isArray: ${Array.isArray(imageBuffer)}`);
+        }
+      }
+      
       // Use Sharp to handle EXIF orientation and get consistent results
-      const sharpImage = sharp(imageBuffer);
+      const sharpImage = sharp(buffer);
       
       // Get metadata to check orientation
       const metadata = await sharpImage.metadata();
+      console.log(`[FaceDetector] Image metadata: ${metadata.width}x${metadata.height}, format=${metadata.format}`);
       
       // Auto-rotate based on EXIF and convert to JPEG
-      const buffer = await sharpImage
+      const processedBuffer = await sharpImage
         .rotate() // This automatically handles EXIF orientation
         .jpeg({ quality: 95 }) // Higher quality for face detection
         .toBuffer();
       
       // Load into OpenCV
-      const cvImage = cv.imdecode(buffer);
+      cvImage = cv.imdecode(processedBuffer);
       
+      if (!cvImage || cvImage.empty) {
+        throw new Error('Failed to decode image with OpenCV');
+      }
+      
+      console.log(`[FaceDetector] Image loaded successfully: ${cvImage.cols}x${cvImage.rows}`);
       return cvImage;
+      
     } catch (error) {
       console.error(`[FaceDetector] Failed to load image from buffer:`, error.message);
       console.error(`[FaceDetector] Image loading error stack:`, error.stack);
-      console.error(`[FaceDetector] Buffer info: length=${imageBuffer?.length}, type=${typeof imageBuffer}`);
+      console.error(`[FaceDetector] Buffer info: length=${imageBuffer?.length}, type=${typeof imageBuffer}, isBuffer=${Buffer.isBuffer(imageBuffer)}`);
 
-      if (cvImage) cvImage.release();
+      // Clean up on error
+      if (cvImage && !cvImage.empty) {
+        cvImage.release();
+      }
       throw error;
     } 
   }
@@ -664,6 +695,16 @@ class FaceDetector {
         try {
           console.log(`[FaceDetector] Using YOLO detection`);
           faces = await this.detectFacesYOLO(image);
+          
+          // If YOLO finds no faces, try Haar as fallback for better coverage
+          if (faces.length === 0) {
+            console.log(`[FaceDetector] YOLO found no faces, trying Haar fallback...`);
+            const haarFaces = await this.detectFacesHaar(image);
+            if (haarFaces.length > 0) {
+              console.log(`[FaceDetector] Haar fallback found ${haarFaces.length} faces`);
+              faces = haarFaces;
+            }
+          }
         } catch (error) {
           console.warn('[FaceDetector] YOLO failed, falling back to Haar:', error.message);
           faces = await this.detectFacesHaar(image);

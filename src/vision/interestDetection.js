@@ -605,10 +605,25 @@ class InterestDetector {
     const cv = require('@u4/opencv4nodejs');
     let image = null;
     try {
-      console.log(`[InterestDetector] Starting interest region detection from buffer (${imageBuffer.length} bytes)`);
+      // Handle IPC buffer serialization
+      let buffer = imageBuffer;
+      if (!Buffer.isBuffer(imageBuffer) && imageBuffer?.type === 'Buffer' && Array.isArray(imageBuffer?.data)) {
+        buffer = Buffer.from(imageBuffer.data);
+        console.log(`[InterestDetector] Converted serialized buffer: ${buffer.length} bytes`);
+      }
+      
+      console.log(`[InterestDetector] Starting interest region detection from buffer (${buffer?.length || 'unknown'} bytes)`);
+      
+      if (!buffer || (!Buffer.isBuffer(buffer) && buffer.length === undefined)) {
+        throw new Error('Invalid or empty image buffer for interest detection');
+      }
       
       // Decode image buffer using OpenCV
-      image = cv.imdecode(imageBuffer);
+      image = cv.imdecode(buffer);
+      if (!image || image.empty) {
+        throw new Error('Failed to decode image buffer for interest detection');
+      }
+      
       console.log(`[InterestDetector] Image decoded: ${image.cols}x${image.rows} pixels`);
       
       // Use the existing interest detection

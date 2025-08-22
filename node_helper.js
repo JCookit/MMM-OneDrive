@@ -10,13 +10,13 @@ const path = require("path");
 const moment = require("moment");
 const { Readable } = require("stream");
 const { finished } = require("stream/promises");
+const { spawn } = require("child_process");
 const { RE2 } = require("re2-wasm");
 const NodeHelper = require("node_helper");
 const Log = require("logger");
 const crypto = require("crypto");
-const { getMatStats, logMatMemory } = require("./src/vision/matManager");
 
-// OpenCV Memory Debugging unified through matManager
+// Main process no longer imports OpenCV - all vision processing isolated in worker
 const OneDrivePhotos = require("./OneDrivePhotos.js");
 const { shuffle } = require("./shuffle.js");
 const { error_to_string } = require("./error_to_string.js");
@@ -127,6 +127,10 @@ const nodeHelperObject = {
   localPhotoPntr: 0,
   uiRunner: null,
   moduleSuspended: false,
+  visionWorker: null,
+  visionWorkerReady: false,
+  visionRequestId: 0,
+  visionRequests: new Map(),
   start: function () {
     this.log_info("Starting module helper");
     this.config = {};
@@ -144,6 +148,10 @@ const nodeHelperObject = {
     this.CACHE_FOLDERS_PATH = path.resolve(this.path, "cache", "selectedFoldersCache.json");
     this.CACHE_PHOTOLIST_PATH = path.resolve(this.path, "cache", "photoListCache.json");
     this.CACHE_CONFIG = path.resolve(this.path, "cache", "config.json");
+    
+    // Initialize vision worker process
+    this.initializeVisionWorker();
+    
     this.log_info("Started");
   },
 
@@ -181,55 +189,242 @@ const nodeHelperObject = {
     }
   },
 
-  performFaceDetection: async function(imageBuffer, filename) {
-    console.log(`[NodeHelper] � Face detection starting for: ${filename || 'unknown'}`);
-    logMatMemory("BEFORE face detection");
+  // ==================== VISION WORKER PROCESS MANAGEMENT ====================
+
+  initializeVisionWorker: function() {
+    console.log("[NodeHelper] Initializing vision worker process...");
     
-    try {
-      // Import the face detection module (dynamic import since it's optional)
-      const { faceDetector } = await import('./src/vision/faceDetection.js');
+    const workerPath = path.join(__dirname, 'src/vision/vision-worker.js');
+    
+    this.visionWorker = spawn('node', [
+      '--max-old-space-size=512',  // 512MB memory limit for worker
+      workerPath
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc']
+    });
+
+    // Forward worker stdout to main process (for unified logging)
+    this.visionWorker.stdout.on('data', (data) => {
+      const lines = data.toString().trim().split('\n');
+      lines.forEach(line => {
+        if (line.trim()) {
+          console.log(`[Vision Worker] ${line}`);
+        }
+      });
+    });
+
+    // Forward worker stderr to main process
+    this.visionWorker.stderr.on('data', (data) => {
+      const lines = data.toString().trim().split('\n');
+      lines.forEach(line => {
+        if (line.trim()) {
+          console.error(`[Vision Worker ERROR] ${line}`);
+        }
+      });
+    });
+
+    // Handle IPC messages from worker
+    this.visionWorker.on('message', (message) => {
+      this.handleVisionWorkerMessage(message);
+    });
+
+    // Handle worker process exit
+    this.visionWorker.on('exit', (code, signal) => {
+      console.error(`[NodeHelper] Vision worker exited: code=${code}, signal=${signal}`);
+      this.visionWorkerReady = false;
       
-      // Track Mat objects before detection
-      const matStatsBefore = getMatStats();
-      
-      // Only detect faces - no focal point calculation, no debug drawing
-      const faces = await faceDetector.detectFacesOnly(imageBuffer);
-      
-      // Check for Mat object leaks
-      const matStatsAfter = getMatStats();
-      if (matStatsAfter.active > matStatsBefore.active) {
-        console.warn(`[NodeHelper] ⚠️ Potential Mat leak: ${matStatsBefore.active} -> ${matStatsAfter.active} active objects`);
+      if (code !== 0 && !this.shuttingDown) {
+        console.log("[NodeHelper] Restarting vision worker in 3 seconds...");
+        setTimeout(() => {
+          this.initializeVisionWorker();
+        }, 3000);
       }
+    });
+
+    // Handle worker process errors
+    this.visionWorker.on('error', (error) => {
+      console.error("[NodeHelper] Vision worker process error:", error.message);
+      this.visionWorkerReady = false;
+    });
+
+    console.log(`[NodeHelper] Vision worker process spawned with PID: ${this.visionWorker.pid}`);
+  },
+
+  handleVisionWorkerMessage: function(message) {
+    const { type, requestId } = message;
+    
+    switch (type) {
+      case 'WORKER_READY':
+        console.log("[NodeHelper] ✅ Vision worker ready");
+        this.visionWorkerReady = true;
+        break;
       
-      logMatMemory("AFTER face detection");
-      console.log(`[NodeHelper] ✅ Face detection completed: found ${faces.length} faces`);
+      case 'WORKER_ERROR':
+        console.error("[NodeHelper] Vision worker initialization failed:", message.error);
+        this.visionWorkerReady = false;
+        break;
       
-      return faces; // Just return array of face objects: [{ x, y, width, height, confidence }]
+      case 'WORKER_CRASH':
+        console.error("[NodeHelper] Vision worker crashed:", message.error);
+        if (message.stack) {
+          console.error("[NodeHelper] Crash stack:", message.stack);
+        }
+        this.visionWorkerReady = false;
+        break;
       
-    } catch (error) {
-      console.error(`[NodeHelper] ❌ Face detection failed for ${filename || 'unknown'}:`, error.message);
-      console.error(`[NodeHelper] ❌ Face detection error stack:`, error.stack);
-      logMatMemory("AFTER face detection error");
-      this.log_debug("Face detection failed:", error.message);
-      return []; // Return empty array on failure
+      case 'FACE_DETECTION_RESULT':
+      case 'FACE_DETECTION_ERROR':
+        this.handleVisionWorkerResponse(message);
+        break;
+      
+      case 'HEALTH_CHECK_RESULT':
+      case 'STATS_RESULT':
+        this.handleVisionWorkerResponse(message);
+        break;
+      
+      default:
+        console.warn(`[NodeHelper] Unknown vision worker message type: ${type}`);
     }
   },
+
+  handleVisionWorkerResponse: function(message) {
+    const { requestId } = message;
+    
+    if (this.visionRequests.has(requestId)) {
+      const { resolve, reject, timeout } = this.visionRequests.get(requestId);
+      
+      // Clear timeout
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      
+      // Remove request from map
+      this.visionRequests.delete(requestId);
+      
+      // Handle response
+      if (message.type.endsWith('_ERROR')) {
+        const error = new Error(message.error);
+        error.stack = message.stack;
+        reject(error);
+      } else {
+        resolve(message);
+      }
+    } else {
+      console.warn(`[NodeHelper] Received response for unknown request ID: ${requestId}`);
+    }
+  },
+
+  sendVisionWorkerMessage: function(message, timeoutMs = 30000) {
+    return new Promise((resolve, reject) => {
+      if (!this.visionWorker || !this.visionWorkerReady) {
+        reject(new Error('Vision worker not available'));
+        return;
+      }
+      
+      const requestId = ++this.visionRequestId;
+      message.requestId = requestId;
+      
+      // Set up timeout
+      const timeout = setTimeout(() => {
+        this.visionRequests.delete(requestId);
+        reject(new Error(`Vision worker timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+      
+      // Store request
+      this.visionRequests.set(requestId, { resolve, reject, timeout });
+      
+      // Send message to worker
+      this.visionWorker.send(message);
+    });
+  },
+
+  shutdownVisionWorker: function() {
+    if (this.visionWorker) {
+      console.log("[NodeHelper] Shutting down vision worker...");
+      this.shuttingDown = true;
+      
+      try {
+        this.visionWorker.send({ type: 'SHUTDOWN' });
+      } catch (error) {
+        console.warn("[NodeHelper] Could not send shutdown message to vision worker:", error.message);
+      }
+      
+      setTimeout(() => {
+        if (this.visionWorker && !this.visionWorker.killed) {
+          console.log("[NodeHelper] Force killing vision worker...");
+          this.visionWorker.kill('SIGTERM');
+        }
+      }, 5000);
+    }
+  },
+
+  // ==================== END VISION WORKER MANAGEMENT ====================
 
   findInterestingRectangle: async function(imageBuffer, filename) {
     console.log(`[NodeHelper] 🎯 Finding focal point for: ${filename || 'unknown'}`);
     
-    // Check if face detection is disabled in config (defaults to enabled if not specified)
-    const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
-    console.log(`[NodeHelper] Face detection enabled: ${faceDetectionEnabled}`);
+    try {
+      // Check if face detection is disabled in config (defaults to enabled if not specified)
+      const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
+      console.log(`[NodeHelper] Face detection enabled: ${faceDetectionEnabled}`);
+      
+      // Use vision worker for complete image processing
+      if (this.visionWorkerReady) {
+        console.log(`[NodeHelper] Using vision worker for complete image processing...`);
+        
+        const response = await this.sendVisionWorkerMessage({
+          type: 'PROCESS_IMAGE',
+          imageBuffer: imageBuffer,
+          filename: filename,
+          config: {
+            faceDetection: { enabled: faceDetectionEnabled }
+          }
+        });
+        
+        if (response.type === 'PROCESSING_RESULT') {
+          const { result, processingTime } = response;
+          console.log(`[NodeHelper] ✅ Vision worker completed in ${processingTime}ms: method=${result.method}`);
+          return result;
+        } else {
+          throw new Error(`Unexpected vision worker response: ${response.type}`);
+        }
+      } else {
+        console.warn("[NodeHelper] Vision worker not ready, using fallback processing...");
+        return this.findInterestingRectangleFallback(imageBuffer, filename, faceDetectionEnabled);
+      }
+      
+    } catch (error) {
+      console.error(`[NodeHelper] ❌ Vision processing failed for ${filename || 'unknown'}:`, error.message);
+      console.log(`[NodeHelper] Using center fallback due to error`);
+      
+      // Return center fallback on any error
+      return {
+        focalPoint: {
+          x: 0.25,
+          y: 0.25,
+          width: 0.5,
+          height: 0.5,
+          type: 'center_fallback',
+          method: 'error_fallback'
+        },
+        method: 'error_fallback',
+        faces: []
+      };
+    }
+  },
+
+  // Fallback processing when vision worker is not available
+  findInterestingRectangleFallback: async function(imageBuffer, filename, faceDetectionEnabled) {
+    console.log(`[NodeHelper] 🔄 Using minimal fallback processing (vision worker unavailable)`);
     
     if (!faceDetectionEnabled) {
       console.log(`[NodeHelper] 🎬 Face detection disabled in config - using center focal point`);
       return {
         focalPoint: {
-          x: 0.25,        // 25% from left (start of center crop area)
-          y: 0.25,        // 25% from top (start of center crop area)  
-          width: 0.5,     // 50% width (center half of image)
-          height: 0.5,    // 50% height (center half of image)
+          x: 0.25,
+          y: 0.25,
+          width: 0.5,
+          height: 0.5,
           type: 'center_fallback',
           method: 'face_detection_disabled'
         },
@@ -238,136 +433,22 @@ const nodeHelperObject = {
       };
     }
     
-    logMatMemory("BEFORE focal point analysis");
+    // When vision worker is unavailable, we can't do any actual processing
+    // Just return center fallback as a safe default
+    console.log(`[NodeHelper] ⚠️ Vision processing unavailable - using center fallback`);
     
-    try {
-      this.log_debug("Starting focal point analysis for:", filename);
-      
-      // Step 1: Try face detection first
-      let faces = [];
-      try {
-        faces = await this.performFaceDetection(imageBuffer, filename);
-        this.log_debug(`Face detection found ${faces.length} faces for ${filename}`);
-      } catch (faceError) {
-        console.log(`[NodeHelper] Face detection failed:`, faceError.message);
-        this.log_debug("Face detection failed:", faceError.message);
-        // Continue with faces = [] (empty array)
-      }
-      
-      let focalPoint = null;
-      let method = 'none';
-      
-      // Step 2: If faces found, create all-face bounding box
-      if (faces.length > 0) {
-        console.log(`[NodeHelper] Creating focal point from ${faces.length} face(s)`);
-        
-        // Find bounding box that contains all faces
-        const minX = Math.min(...faces.map(f => f.x));
-        const minY = Math.min(...faces.map(f => f.y));
-        const maxX = Math.max(...faces.map(f => f.x + f.width));
-        const maxY = Math.max(...faces.map(f => f.y + f.height));
-        
-        // Add some padding around the faces
-        const padding = 0.0; // try no padding
-        const width = maxX - minX;
-        const height = maxY - minY;
-        const paddingX = width * padding;
-        const paddingY = height * padding;
-        
-        focalPoint = {
-          x: Math.max(0, minX - paddingX),
-          y: Math.max(0, minY - paddingY), 
-          width: width + (paddingX * 2),
-          height: height + (paddingY * 2),
-          type: 'face',
-          method: 'all_faces_bounding_box'
-        };
-        method = 'faces';
-        console.log(`[NodeHelper] Face-based focal point created for ${faces.length} faces`);
-      }
-      
-      // Step 3: If no faces, try interest detection
-      if (!focalPoint) {
-        console.log(`[NodeHelper] No faces found, trying interest detection...`);
-        const matStatsBeforeInterest = getMatStats();
-        
-        try {
-          // Import and use InterestDetector directly
-          const InterestDetector = require('./src/vision/interestDetection.js');
-          const interestDetector = new InterestDetector({
-            sizeMode: 'adaptive',
-            minConfidenceThreshold: 0.65,
-            minScoreThreshold: 30,
-            enableDebugLogs: false
-          });
-          
-          const interestResult = await interestDetector.detectInterestRegions(imageBuffer);
-          if (interestResult && interestResult.focalPoint) {
-            focalPoint = interestResult.focalPoint;
-            method = 'interest';
-            console.log(`[NodeHelper] Interest-based focal point found`);
-          }
-          
-          // Check for Mat leaks in interest detection
-          const matStatsAfterInterest = getMatStats();
-          if (matStatsAfterInterest.active > matStatsBeforeInterest.active) {
-            console.warn(`[NodeHelper] ⚠️ Interest detection Mat leak: ${matStatsBeforeInterest.active} -> ${matStatsAfterInterest.active} active objects`);
-          }
-          
-        } catch (interestError) {
-          console.error(`[NodeHelper] Interest detection failed:`, interestError.message);
-          console.error(`[NodeHelper] Interest detection error stack:`, interestError.stack);
-          this.log_debug("Interest detection failed:", interestError.message);
-        }
-      }
-      
-      // Step 4: Default fallback - center crop
-      if (!focalPoint) {
-        console.log(`[NodeHelper] No focal point found, using default center`);
-        focalPoint = {
-          x: 0.25,
-          y: 0.25,
-          width: 0.5,
-          height: 0.5,
-          type: 'default',
-          method: 'center_fallback'
-        };
-        method = 'default';
-      }
-      
-      logMatMemory("AFTER focal point analysis");
-      console.log(`[NodeHelper] ✅ findInterestingRectangle completed: method=${method}`);
-      this.log_debug(`Focal point analysis completed for ${filename}:`, {
-        method: method,
-        faceCount: faces.length
-      });
-      
-      return {
-        focalPoint,
-        method,
-        faces
-      };
-      
-    } catch (error) {
-      console.error(`[NodeHelper] ❌ findInterestingRectangle failed for ${filename || 'unknown'}:`, error.message);
-      console.error(`[NodeHelper] Error stack:`, error.stack);
-      logMatMemory("AFTER focal point error");
-      this.log_debug("Focal point analysis failed, using fallback:", error.message);
-      
-      // Return default fallback on any error
-      return {
-        focalPoint: {
-          x: 0.25,
-          y: 0.25,
-          width: 0.5,
-          height: 0.5,
-          type: 'default',
-          method: 'error_fallback'
-        },
-        method: 'error_fallback',
-        faces: []
-      };
-    }
+    return {
+      focalPoint: {
+        x: 0.25,
+        y: 0.25,
+        width: 0.5,
+        height: 0.5,
+        type: 'center_fallback',
+        method: 'worker_unavailable'
+      },
+      method: 'worker_unavailable',
+      faces: []
+    };
   },
 
   log_debug: function (...args) {
@@ -1012,6 +1093,9 @@ const nodeHelperObject = {
   stop: function () {
     this.log_info("Stopping module helper");
     clearInterval(this.scanTimer);
+    
+    // Shutdown vision worker process
+    this.shutdownVisionWorker();
   },
 
   savePhotoListCache: function () {
