@@ -244,26 +244,19 @@ class VisionWorker {
       console.error(`[VisionWorker] Error stack:`, error.stack);
       logMatMemory("AFTER vision processing error (worker)");
       
-      // Return default center fallback on any error
-      const fallbackResult = {
-        focalPoint: {
-          x: 0.25,
-          y: 0.25,
-          width: 0.5,
-          height: 0.5,
-          type: 'center_fallback',
-          method: 'error_fallback'
-        },
-        method: 'error_fallback',
+      // Return null focalPoint and error - let main process handle fallback
+      const errorResult = {
+        focalPoint: null,
+        method: null,
         faces: [],
         error: error.message
       };
       
-      // Send fallback result back to parent
+      // Send error result back to parent
       this.safeSend({
         type: 'PROCESSING_RESULT',
         requestId,
-        result: fallbackResult,
+        result: errorResult,
         processingTime,
         error: error.message,
         timestamp: Date.now()
@@ -351,21 +344,13 @@ class VisionWorker {
       }
     }
     
-    // Step 4: Default fallback - center crop
+    // Step 4: If no focal point found, return null - let main process handle fallback
     if (!focalPoint) {
-      console.debug(`[VisionWorker] Step 4: No focal point found, using default center`);
-      focalPoint = {
-        x: 0.25,
-        y: 0.25,
-        width: 0.5,
-        height: 0.5,
-        type: 'default',
-        method: 'center_fallback'
-      };
-      method = 'default';
+      console.debug(`[VisionWorker] Step 4: No focal point found - returning null for main process fallback`);
+      method = 'no_detection';
     }
     
-    console.log(`[VisionWorker] ✅ Complete vision processing completed: method=${method}`);
+    console.log(`[VisionWorker] ✅ Complete vision processing completed: method=${method || 'no_detection'}`);
     
     // Step 5: Create debug image if requested
     let debugImageBase64 = null;

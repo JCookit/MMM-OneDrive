@@ -23,6 +23,64 @@ const { error_to_string } = require("./error_to_string.js");
 const { cachePath } = require("./msal/authConfig.js");
 const { convertHEIC } = require("./photosConverter-node");
 const { fetchToUint8Array, FetchHTTPError } = require("./fetchItem-node");
+const sharp = require('sharp');
+
+
+/**
+ * Create a center fallback focal point in pixel coordinates
+ * @param {Buffer} imageBuffer - Image buffer to get dimensions from
+ * @param {string} method - The fallback method/reason
+ * @returns {Promise<Object>} Fallback result with pixel coordinates
+ */
+async function createCenterFallback(imageBuffer, method) {
+  try {
+    // Get image dimensions using Sharp
+    const metadata = await sharp(imageBuffer).metadata();
+    const { width, height } = metadata;
+    
+    // Create center rectangle (50% of image centered)
+    const focalWidth = Math.round(width * 0.5);
+    const focalHeight = Math.round(height * 0.5);
+    const focalX = Math.round((width - focalWidth) / 2);
+    const focalY = Math.round((height - focalHeight) / 2);
+    
+    return {
+      focalPoint: {
+        x: focalX,
+        y: focalY,
+        width: focalWidth,
+        height: focalHeight,
+        type: 'center_fallback',
+        method: method
+      },
+      method: method,
+      faces: []
+    };
+  } catch (error) {
+    console.warn(`[NodeHelper] Could not get image dimensions for fallback, using default: ${error.message}`);
+    
+    // If we can't get dimensions, use reasonable defaults (assuming common photo size)
+    const defaultWidth = 1920;
+    const defaultHeight = 1080;
+    const focalWidth = Math.round(defaultWidth * 0.5);
+    const focalHeight = Math.round(defaultHeight * 0.5);
+    const focalX = Math.round((defaultWidth - focalWidth) / 2);
+    const focalY = Math.round((defaultHeight - focalHeight) / 2);
+    
+    return {
+      focalPoint: {
+        x: focalX,
+        y: focalY, 
+        width: focalWidth,
+        height: focalHeight,
+        type: 'center_fallback',
+        method: method
+      },
+      method: method,
+      faces: []
+    };
+  }
+}
 
 
 /**
@@ -120,7 +178,7 @@ const nodeHelperObject = {
     this.CACHE_CONFIG = path.resolve(this.path, "cache", "config.json");
     
     // Initialize vision worker process
-    this.initializeVisionWorker();
+    // this.initializeVisionWorker();
     
     this.log_info("Started");
   },
@@ -330,6 +388,48 @@ const nodeHelperObject = {
     });
 
     console.log(`[NodeHelper] Vision worker process spawned with PID: ${this.visionWorker.pid}`);
+    
+    // Set up periodic health check to detect dead workers
+    this.startVisionWorkerHealthCheck();
+  },
+
+  /**
+   * Start periodic health checking of the vision worker
+   */
+  startVisionWorkerHealthCheck: function() {
+    // Clear any existing health check
+    if (this.visionWorkerHealthCheckInterval) {
+      clearInterval(this.visionWorkerHealthCheckInterval);
+    }
+
+    console.log("Starting vision process health check");
+    
+    // Check worker health every 10 seconds
+    this.visionWorkerHealthCheckInterval = setInterval(() => {
+      if (!this.visionWorkerReady || !this.isVisionWorkerAlive()) {
+        console.warn("[NodeHelper] Vision worker health check failed - process is dead");
+        this.visionWorkerReady = false;
+        
+        // Clean up the dead worker reference
+        this.visionWorker = null;
+        
+        // Trigger restart
+        setTimeout(() => {
+          this.initializeVisionWorker();
+        }, 1000);
+      }
+    }, 10000); // Check every 10 seconds
+  },
+
+  /**
+   * Stop the vision worker health check
+   */
+  stopVisionWorkerHealthCheck: function() {
+    if (this.visionWorkerHealthCheckInterval) {
+      clearInterval(this.visionWorkerHealthCheckInterval);
+      this.visionWorkerHealthCheckInterval = null;
+    }
+    console.log("Stopping worker process health check");
   },
 
   handleVisionWorkerMessage: function(message) {
@@ -398,9 +498,44 @@ const nodeHelperObject = {
     }
   },
 
+  /**
+   * Check if the vision worker process is actually alive
+   * @returns {boolean} True if worker process is running
+   */
+  isVisionWorkerAlive: function() {
+    if (!this.visionWorker || !this.visionWorker.pid) {
+      return false;
+    }
+    
+    try {
+      // Use kill(0) to test if process exists without actually sending a signal
+      process.kill(this.visionWorker.pid, 0);
+      return true;
+    } catch (error) {
+      // ESRCH error means process doesn't exist
+      if (error.code === 'ESRCH') {
+        console.warn(`[NodeHelper] Vision worker PID ${this.visionWorker.pid} no longer exists`);
+        this.visionWorkerReady = false;
+        return false;
+      }
+      // Other errors (like EPERM) mean process exists but we can't signal it
+      return true;
+    }
+  },
+
   sendVisionWorkerMessage: function(message, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
-      if (!this.visionWorker || !this.visionWorkerReady) {
+      // Check both the ready flag AND that the process is actually alive
+      if (!this.visionWorker || !this.visionWorkerReady || !this.isVisionWorkerAlive()) {
+        // // If worker is dead but we didn't know it, trigger restart
+        // if (this.visionWorker && !this.isVisionWorkerAlive()) {
+        //   console.warn("[NodeHelper] Dead vision worker detected, triggering restart...");
+        //   this.visionWorkerReady = false;
+        //   setTimeout(() => {
+        //     this.initializeVisionWorker();
+        //   }, 1000); // Shorter delay since we detected it's already dead
+        // }
+        
         reject(new Error('Vision worker not available'));
         return;
       }
@@ -426,6 +561,9 @@ const nodeHelperObject = {
     if (this.visionWorker) {
       console.log("[NodeHelper] Shutting down vision worker...");
       this.shuttingDown = true;
+      
+      // Stop health checking
+      this.stopVisionWorkerHealthCheck();
       
       try {
         this.visionWorker.send({ type: 'SHUTDOWN' });
@@ -468,6 +606,14 @@ const nodeHelperObject = {
         
         if (response.type === 'PROCESSING_RESULT') {
           const { result, processingTime } = response;
+          
+          // Check if worker returned an error or null focalPoint
+          if (result.error || !result.focalPoint) {
+            console.log(`[NodeHelper] ⚠️ Vision worker returned error or no detection: ${result.error || 'no focal point found'}`);
+            console.log(`[NodeHelper] Using center fallback instead`);
+            return await createCenterFallback(imageBuffer, result.error ? 'worker_error' : 'no_detection');
+          }
+          
           console.log(`[NodeHelper] ✅ Vision worker completed in ${processingTime}ms: method=${result.method}`);
           return result;
         } else {
@@ -475,7 +621,7 @@ const nodeHelperObject = {
         }
       } else {
         console.warn("[NodeHelper] Vision worker not ready, using fallback processing...");
-        return this.findInterestingRectangleFallback(imageBuffer, filename, faceDetectionEnabled);
+        return await createCenterFallback(imageBuffer, 'worker_not_ready')
       }
       
     } catch (error) {
@@ -483,58 +629,10 @@ const nodeHelperObject = {
       console.log(`[NodeHelper] Using center fallback due to error`);
       
       // Return center fallback on any error
-      return {
-        focalPoint: {
-          x: 0.25,
-          y: 0.25,
-          width: 0.5,
-          height: 0.5,
-          type: 'center_fallback',
-          method: 'error_fallback'
-        },
-        method: 'error_fallback',
-        faces: []
-      };
+      return await createCenterFallback(imageBuffer, 'error_fallback');
     }
   },
 
-  // Fallback processing when vision worker is not available
-  findInterestingRectangleFallback: async function(imageBuffer, filename, faceDetectionEnabled) {
-    console.log(`[NodeHelper] 🔄 Using minimal fallback processing (vision worker unavailable)`);
-    
-    if (!faceDetectionEnabled) {
-      console.log(`[NodeHelper] 🎬 Face detection disabled in config - using center focal point`);
-      return {
-        focalPoint: {
-          x: 0.25,
-          y: 0.25,
-          width: 0.5,
-          height: 0.5,
-          type: 'center_fallback',
-          method: 'face_detection_disabled'
-        },
-        method: 'face_detection_disabled',
-        faces: []
-      };
-    }
-    
-    // When vision worker is unavailable, we can't do any actual processing
-    // Just return center fallback as a safe default
-    console.log(`[NodeHelper] ⚠️ Vision processing unavailable - using center fallback`);
-    
-    return {
-      focalPoint: {
-        x: 0.25,
-        y: 0.25,
-        width: 0.5,
-        height: 0.5,
-        type: 'center_fallback',
-        method: 'worker_unavailable'
-      },
-      method: 'worker_unavailable',
-      faces: []
-    };
-  },
 
   log_debug: function (...args) {
     Log.debug(`[${this.name}] [node_helper]`, ...args);
@@ -560,6 +658,9 @@ const nodeHelperObject = {
     }
     if (this.config.scanInterval < MINIMUM_SCAN_INTERVAL) {
       this.config.scanInterval = MINIMUM_SCAN_INTERVAL;
+    }
+    if (this.config.kenBurnsEffect) {
+      this.initializeVisionWorker();
     }
     oneDrivePhotosInstance = new OneDrivePhotos({
       debug: this.debug,
