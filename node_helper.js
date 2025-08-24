@@ -53,8 +53,7 @@ async function createCenterFallback(imageBuffer, method) {
         type: 'center_fallback',
         method: method
       },
-      method: method,
-      faces: []
+      method: method
     };
   } catch (error) {
     console.warn(`[NodeHelper] Could not get image dimensions for fallback, using default: ${error.message}`);
@@ -76,8 +75,7 @@ async function createCenterFallback(imageBuffer, method) {
         type: 'center_fallback',
         method: method
       },
-      method: method,
-      faces: []
+      method: method
     };
   }
 }
@@ -582,6 +580,104 @@ const nodeHelperObject = {
 
   // ==================== END VISION WORKER MANAGEMENT ====================
 
+  /**
+   * Choose the best focal point from face detection and interest region results
+   * This implements the decision-making logic that was previously in the worker
+   */
+  chooseFocalPointFromDetections: async function(detectionResults, imageBuffer, filename) {
+    const { faces, interestRegions, debugImageBase64 } = detectionResults;
+    
+    console.log(`[NodeHelper] 🎯 Choosing focal point from ${faces.length} faces and ${interestRegions.length} interest regions`);
+    
+    // Priority 1: Use faces if available - construct all-faces bounding box
+    if (faces && faces.length > 0) {
+      console.log(`[NodeHelper] 📍 Using face detection (${faces.length} faces found)`);
+      
+      // Sort faces by confidence for logging
+      const sortedFaces = faces.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+      const bestFace = sortedFaces[0];
+      
+      let focalPoint;
+      
+      if (faces.length === 1) {
+        // Single face - use the face rectangle directly
+        focalPoint = {
+          x: bestFace.x,
+          y: bestFace.y,
+          width: bestFace.width,
+          height: bestFace.height,
+          type: 'face',
+          method: 'single_face_detection',
+          confidence: bestFace.confidence
+        };
+        
+        console.log(`[NodeHelper] Selected single face: confidence=${bestFace.confidence?.toFixed(3) || 'unknown'}, ` +
+                   `rect=[${bestFace.x?.toFixed(3)}, ${bestFace.y?.toFixed(3)}, ${bestFace.width?.toFixed(3)}, ${bestFace.height?.toFixed(3)}]`);
+      } else {
+        // Multiple faces - create bounding box that contains all faces
+        const minX = Math.min(...faces.map(f => f.x));
+        const minY = Math.min(...faces.map(f => f.y));
+        const maxX = Math.max(...faces.map(f => f.x + f.width));
+        const maxY = Math.max(...faces.map(f => f.y + f.height));
+        
+        focalPoint = {
+          x: minX,
+          y: minY,
+          width: maxX - minX,
+          height: maxY - minY,
+          type: 'face',
+          method: 'multi_face_detection',
+          confidence: bestFace.confidence // Use best face confidence
+        };
+        
+        console.log(`[NodeHelper] Created all-faces bounding box for ${faces.length} faces: ` +
+                   `rect=[${minX.toFixed(3)}, ${minY.toFixed(3)}, ${(maxX - minX).toFixed(3)}, ${(maxY - minY).toFixed(3)}]`);
+      }
+      
+      return {
+        focalPoint: focalPoint,
+        method: focalPoint.method,
+        debugImageBase64: debugImageBase64
+      };
+    }
+    
+    // Priority 2: Use interest regions if no faces found
+    if (interestRegions && interestRegions.length > 0) {
+      console.log(`[NodeHelper] 📍 No faces found, using interest detection (${interestRegions.length} regions found)`);
+      
+      // Use the highest confidence interest region
+      const bestInterest = interestRegions[0]; // Already sorted by confidence in worker
+      
+      console.log(`[NodeHelper] Selected best interest region: confidence=${bestInterest.confidence?.toFixed(3) || 'unknown'}, ` +
+                 `rect=[${bestInterest.x?.toFixed(3)}, ${bestInterest.y?.toFixed(3)}, ${bestInterest.width?.toFixed(3)}, ${bestInterest.height?.toFixed(3)}]`);
+      
+      return {
+        focalPoint: {
+          x: bestInterest.x,
+          y: bestInterest.y,
+          width: bestInterest.width,
+          height: bestInterest.height,
+          type: 'interest',
+          method: 'interest_detection',
+          confidence: bestInterest.confidence
+        },
+        method: 'interest_detection',
+        debugImageBase64: debugImageBase64
+      };
+    }
+    
+    // Priority 3: No detections found - use center fallback via createCenterFallback function
+    console.log(`[NodeHelper] 📍 No faces or interest regions found, using center fallback`);
+    
+    const centerFallback = await createCenterFallback(imageBuffer, 'no_detections_found');
+    
+    return {
+      focalPoint: centerFallback.focalPoint,
+      method: centerFallback.method,
+      debugImageBase64: debugImageBase64
+    };
+  },
+
   findInterestingRectangle: async function(imageBuffer, filename) {
     console.log(`[NodeHelper] 🎯 Finding focal point for: ${filename || 'unknown'}`);
     
@@ -607,15 +703,21 @@ const nodeHelperObject = {
         if (response.type === 'PROCESSING_RESULT') {
           const { result, processingTime } = response;
           
-          // Check if worker returned an error or null focalPoint
-          if (result.error || !result.focalPoint) {
-            console.log(`[NodeHelper] ⚠️ Vision worker returned error or no detection: ${result.error || 'no focal point found'}`);
+          // Check if worker returned an error
+          if (result.error) {
+            console.log(`[NodeHelper] ⚠️ Vision worker returned error: ${result.error}`);
             console.log(`[NodeHelper] Using center fallback instead`);
-            return await createCenterFallback(imageBuffer, result.error ? 'worker_error' : 'no_detection');
+            return await createCenterFallback(imageBuffer, 'worker_error');
           }
           
-          console.log(`[NodeHelper] ✅ Vision worker completed in ${processingTime}ms: method=${result.method}`);
-          return result;
+          console.log(`[NodeHelper] ✅ Vision worker completed in ${processingTime}ms`);
+          console.log(`[NodeHelper] Detection results: ${result.faces.length} faces, ${result.interestRegions.length} interest regions`);
+          
+          // Make focal point decision from the detection results
+          const focalPointResult = this.chooseFocalPointFromDetections(result, imageBuffer, filename);
+          console.log(`[NodeHelper] Final focal point decision: method=${focalPointResult.method}`);
+          
+          return focalPointResult;
         } else {
           throw new Error(`Unexpected vision worker response: ${response.type}`);
         }

@@ -205,19 +205,12 @@ class VisionWorker {
       let result;
       
       if (!faceDetectionEnabled) {
-        // Face detection disabled - return center focal point immediately
-        console.log(`[VisionWorker] 🎬 Face detection disabled in config - using center focal point`);
+        // Face detection disabled - return empty results for main process to handle
+        console.log(`[VisionWorker] 🎬 Face detection disabled in config - returning empty results`);
         result = {
-          focalPoint: {
-            x: 0.25,
-            y: 0.25,
-            width: 0.5,
-            height: 0.5,
-            type: 'center_fallback',
-            method: 'face_detection_disabled'
-          },
-          method: 'face_detection_disabled',
-          faces: []
+          faces: [],
+          interestRegions: [],
+          debugImageBase64: null
         };
       } else {
         // Run complete processing pipeline
@@ -227,7 +220,7 @@ class VisionWorker {
       const processingTime = Date.now() - startTime;
       logMatMemory("AFTER vision processing (worker)");
       
-      console.log(`[VisionWorker] ✅ Complete processing completed in ${processingTime}ms: method=${result.method}`);
+      console.log(`[VisionWorker] ✅ Complete processing completed in ${processingTime}ms`);
       
       // Send result back to parent
       this.safeSend({
@@ -244,11 +237,11 @@ class VisionWorker {
       console.error(`[VisionWorker] Error stack:`, error.stack);
       logMatMemory("AFTER vision processing error (worker)");
       
-      // Return null focalPoint and error - let main process handle fallback
+      // Return error structure for main process to handle
       const errorResult = {
-        focalPoint: null,
-        method: null,
         faces: [],
+        interestRegions: [],
+        debugImageBase64: null,
         error: error.message
       };
       
@@ -266,7 +259,7 @@ class VisionWorker {
 
   /**
    * Complete Vision Processing Pipeline
-   * Implements the full logic from findInterestingRectangleFallback
+   * Implements detection-only logic - returns all candidates for main process to decide
    */
   async performCompleteVisionProcessing(imageBuffer, filename) {
     console.debug(`[VisionWorker] 🔄 Starting complete vision pipeline for ${filename || 'unknown'}`);
@@ -275,11 +268,14 @@ class VisionWorker {
       throw new Error('Vision processors not initialized');
     }
     
-    let focalPoint = null;
-    let method = 'none';
-    let faces = [];
+    // Configuration for detection
+    const MAX_INTEREST_CANDIDATES = 3;
+    const INTEREST_CONFIDENCE_THRESHOLD = 0.65; // Should match face confidence scale
     
-    // Step 1: Try face detection first
+    let faces = [];
+    let interestRegions = [];
+    
+    // Step 1: Always try face detection
     try {
       console.debug(`[VisionWorker] Step 1: Attempting face detection...`);
       faces = await this.faceDetector.detectFacesOnly(imageBuffer);
@@ -289,75 +285,50 @@ class VisionWorker {
       // Continue with faces = [] (empty array)
     }
     
-    // Step 2: If faces found, create focal point from faces
-    if (faces.length > 0) {
-      console.debug(`[VisionWorker] Step 2: Creating focal point from ${faces.length} face(s)`);
-      
-      // Find bounding box that contains all faces  
-      const minX = Math.min(...faces.map(f => f.x));
-      const minY = Math.min(...faces.map(f => f.y));
-      const maxX = Math.max(...faces.map(f => f.x + f.width));
-      const maxY = Math.max(...faces.map(f => f.y + f.height));
-      
-      // No padding for now (as per original logic)
-      const padding = 0.0;
-      const width = maxX - minX;
-      const height = maxY - minY;
-      const paddingX = width * padding;
-      const paddingY = height * padding;
-      
-      focalPoint = {
-        x: Math.max(0, minX - paddingX),
-        y: Math.max(0, minY - paddingY),
-        width: width + (paddingX * 2),
-        height: height + (paddingY * 2),
-        type: 'face',
-        method: 'all_faces_bounding_box'
-      };
-      method = 'faces';
-      console.info(`[VisionWorker] Face-based focal point created for ${faces.length} faces`);
-    }
+    // Step 2: Always try interest detection (regardless of faces found)
+    console.debug(`[VisionWorker] Step 2: Running interest detection...`);
+    const matStatsBeforeInterest = getMatStats();
     
-    // Step 3: If no faces, try interest detection  
-    if (!focalPoint) {
-      console.debug(`[VisionWorker] Step 3: No faces found, trying interest detection...`);
-      const matStatsBeforeInterest = getMatStats();
+    try {
+      const interestResult = await this.interestDetector.detectInterestRegions(imageBuffer);
       
-      try {
-        const interestResult = await this.interestDetector.detectInterestRegions(imageBuffer);
+      if (interestResult && interestResult.candidates && Array.isArray(interestResult.candidates)) {
+        // Filter and sort candidates by confidence
+        interestRegions = interestResult.candidates
+          .filter(candidate => candidate.confidence >= INTEREST_CONFIDENCE_THRESHOLD)
+          .sort((a, b) => b.confidence - a.confidence)
+          .slice(0, MAX_INTEREST_CANDIDATES);
         
-        if (interestResult && interestResult.focalPoint) {
-          focalPoint = interestResult.focalPoint;
-          method = 'interest';
-          console.info(`[VisionWorker] Interest-based focal point found`);
-        }
-        
-        // Check for Mat leaks in interest detection
-        const matStatsAfterInterest = getMatStats();
-        if (matStatsAfterInterest.active > matStatsBeforeInterest.active) {
-          console.warn(`[VisionWorker] ⚠️ Interest detection Mat leak: ${matStatsBeforeInterest.active} -> ${matStatsAfterInterest.active} active objects`);
-        }
-        
-      } catch (interestError) {
-        console.error(`[VisionWorker] Interest detection failed:`, interestError.message);
-        console.error(`[VisionWorker] Interest detection error stack:`, interestError.stack);
+        console.debug(`[VisionWorker] Interest detection found ${interestRegions.length} candidates above ${INTEREST_CONFIDENCE_THRESHOLD} threshold`);
+      } else if (interestResult && interestResult.focalPoint) {
+        // Handle legacy single result format
+        interestRegions = [{
+          ...interestResult.focalPoint,
+          confidence: interestResult.confidence || 0.7 // Default confidence for legacy results
+        }];
+        console.debug(`[VisionWorker] Interest detection found 1 legacy result`);
       }
+      
+      // Check for Mat leaks in interest detection
+      const matStatsAfterInterest = getMatStats();
+      if (matStatsAfterInterest.active > matStatsBeforeInterest.active) {
+        console.warn(`[VisionWorker] ⚠️ Interest detection Mat leak: ${matStatsBeforeInterest.active} -> ${matStatsAfterInterest.active} active objects`);
+      }
+      
+    } catch (interestError) {
+      console.error(`[VisionWorker] Interest detection failed:`, interestError.message);
+      console.error(`[VisionWorker] Interest detection error stack:`, interestError.stack);
+      // Continue with interestRegions = [] (empty array)
     }
     
-    // Step 4: If no focal point found, return null - let main process handle fallback
-    if (!focalPoint) {
-      console.debug(`[VisionWorker] Step 4: No focal point found - returning null for main process fallback`);
-      method = 'no_detection';
-    }
+    console.log(`[VisionWorker] ✅ Detection completed: ${faces.length} faces, ${interestRegions.length} interest regions`);
     
-    console.log(`[VisionWorker] ✅ Complete vision processing completed: method=${method || 'no_detection'}`);
-    
-    // Step 5: Create debug image if requested
+    // Step 3: Create debug image if requested
     let debugImageBase64 = null;
     if (this.config?.debugMode) {
       try {
-        console.debug(`[VisionWorker] Creating debug image for ${filename || 'unknown'} (${faces.length} faces)`);
-        debugImageBase64 = await this.createDebugImage(imageBuffer, faces, focalPoint);
+        console.debug(`[VisionWorker] Creating debug image for ${filename || 'unknown'} (${faces.length} faces, ${interestRegions.length} interests)`);
+        debugImageBase64 = await this.createDebugImage(imageBuffer, faces, interestRegions);
         console.debug(`[VisionWorker] Debug image created successfully`);
       } catch (debugError) {
         console.warn(`[VisionWorker] Debug image creation failed:`, debugError.message);
@@ -365,9 +336,8 @@ class VisionWorker {
     }
     
     return {
-      focalPoint,
-      method,
       faces,
+      interestRegions,
       debugImageBase64
     };
   }
