@@ -16,7 +16,7 @@ function trackMat(mat, context) {
   if (mat && mat.rows && mat.cols) {
     activeMatObjects.add(mat);
     totalMatObjectsCreated++;
-    console.debug(`[MatManager] 📊 Mat created (${context}): ${activeMatObjects.size} active, ${totalMatObjectsCreated} total`);
+    //console.debug(`[MatManager] 📊 Mat created (${context}): ${activeMatObjects.size} active, ${totalMatObjectsCreated} total`);
   }
   return mat;
 }
@@ -29,7 +29,7 @@ function safeRelease(mat, context) {
     if (mat && mat.rows && mat.cols && !mat.empty) {
       mat.release();
       activeMatObjects.delete(mat);
-      console.debug(`[MatManager] 🗑️ Mat released (${context}): ${activeMatObjects.size} active remaining`);
+      //console.debug(`[MatManager] 🗑️ Mat released (${context}): ${activeMatObjects.size} active remaining`);
       return true;
     } else {
       console.debug(`[MatManager] ⏭️ Mat already released or invalid (${context})`);

@@ -714,7 +714,7 @@ const nodeHelperObject = {
           console.log(`[NodeHelper] Detection results: ${result.faces.length} faces, ${result.interestRegions.length} interest regions`);
           
           // Make focal point decision from the detection results
-          const focalPointResult = this.chooseFocalPointFromDetections(result, imageBuffer, filename);
+          const focalPointResult = await this.chooseFocalPointFromDetections(result, imageBuffer, filename);
           console.log(`[NodeHelper] Final focal point decision: method=${focalPointResult.method}`);
           
           return focalPointResult;

@@ -343,13 +343,13 @@ class VisionWorker {
   }
 
   /**
-   * Create debug image with face boxes and focal point overlay
+   * Create debug image with face boxes and interest region overlays
    * @param {Buffer} imageBuffer - Original image buffer
    * @param {Array} faces - Array of face detection results
-   * @param {Object} focalPoint - Focal point object
+   * @param {Array} interestRegions - Array of interest region candidates (ordered by confidence)
    * @returns {Promise<string>} Base64 encoded debug image
    */
-  async createDebugImage(imageBuffer, faces, focalPoint) {
+  async createDebugImage(imageBuffer, faces, interestRegions) {
     let debugImage = null;
     
     try {
@@ -379,8 +379,9 @@ class VisionWorker {
         
         // Add face index label
         const labelPos = new cv.Point2(face.x, face.y - 10);
+        const confidence = face.confidence ? face.confidence.toFixed(2) : 'N/A';
         debugImage.putText(
-          `Face ${index + 1}`,
+          `Face ${index + 1} (${confidence})`,
           labelPos,
           cv.FONT_HERSHEY_SIMPLEX,
           0.7,
@@ -389,40 +390,76 @@ class VisionWorker {
         );
       });
       
-      // Draw focal point rectangle in blue
-      if (focalPoint && typeof focalPoint.x === 'number') {
-        let fpX, fpY, fpWidth, fpHeight;
-        
-        if (focalPoint.x <= 1 && focalPoint.y <= 1) {
-          // Normalized coordinates (0-1)
-          fpX = Math.round(focalPoint.x * debugImage.cols);
-          fpY = Math.round(focalPoint.y * debugImage.rows);
-          fpWidth = Math.round(focalPoint.width * debugImage.cols);
-          fpHeight = Math.round(focalPoint.height * debugImage.rows);
-        } else {
-          // Absolute pixel coordinates
-          fpX = focalPoint.x;
-          fpY = focalPoint.y;
-          fpWidth = focalPoint.width;
-          fpHeight = focalPoint.height;
-        }
-        
-        const fpTopLeft = new cv.Point2(fpX, fpY);
-        const fpBottomRight = new cv.Point2(fpX + fpWidth, fpY + fpHeight);
-        
-        // Blue rectangle for focal point
-        debugImage.drawRectangle(fpTopLeft, fpBottomRight, new cv.Vec3(255, 0, 0), 2);
-        
-        // Add focal point label
-        const fpLabelPos = new cv.Point2(fpX, fpY - 10);
-        debugImage.putText(
-          `Focal (${focalPoint.method || 'unknown'})`,
-          fpLabelPos,
-          cv.FONT_HERSHEY_SIMPLEX,
-          0.6,
-          new cv.Vec3(255, 0, 0),
-          2
-        );
+      // Draw all interest region rectangles
+      if (interestRegions && Array.isArray(interestRegions) && interestRegions.length > 0) {
+        interestRegions.forEach((region, index) => {
+          if (region && typeof region.x === 'number') {
+            let regionX, regionY, regionWidth, regionHeight;
+            
+            if (region.x <= 1 && region.y <= 1) {
+              // Normalized coordinates (0-1)
+              regionX = Math.round(region.x * debugImage.cols);
+              regionY = Math.round(region.y * debugImage.rows);
+              regionWidth = Math.round(region.width * debugImage.cols);
+              regionHeight = Math.round(region.height * debugImage.rows);
+            } else {
+              // Absolute pixel coordinates
+              regionX = region.x;
+              regionY = region.y;
+              regionWidth = region.width;
+              regionHeight = region.height;
+            }
+            
+            const topLeft = new cv.Point2(regionX, regionY);
+            const bottomRight = new cv.Point2(regionX + regionWidth, regionY + regionHeight);
+            
+            // First candidate in red (primary choice), others in blue
+            const isFirstCandidate = index === 0;
+            const color = isFirstCandidate ? new cv.Vec3(0, 0, 255) : new cv.Vec3(255, 128, 0); // Red for first, orange for others
+            const thickness = isFirstCandidate ? 3 : 2;
+            
+            debugImage.drawRectangle(topLeft, bottomRight, color, thickness);
+            
+            // Add interest region label with confidence
+            const confidence = region.confidence ? region.confidence.toFixed(2) : 'N/A';
+            const label = isFirstCandidate ? 
+              `Interest #1 (${confidence})` : 
+              `Interest #${index + 1} (${confidence})`;
+            
+            const labelPos = new cv.Point2(regionX, regionY - 10);
+            debugImage.putText(
+              label,
+              labelPos,
+              cv.FONT_HERSHEY_SIMPLEX,
+              0.6,
+              color,
+              2
+            );
+            
+            // Add crosshair for first candidate only
+            if (isFirstCandidate) {
+              const centerX = regionX + regionWidth / 2;
+              const centerY = regionY + regionHeight / 2;
+              const crossSize = Math.min(regionWidth, regionHeight) * 0.1; // 10% of smaller dimension
+              
+              // Horizontal line
+              debugImage.drawLine(
+                new cv.Point2(centerX - crossSize, centerY),
+                new cv.Point2(centerX + crossSize, centerY),
+                new cv.Vec3(255, 255, 0), // Yellow crosshair
+                2
+              );
+              
+              // Vertical line  
+              debugImage.drawLine(
+                new cv.Point2(centerX, centerY - crossSize),
+                new cv.Point2(centerX, centerY + crossSize),
+                new cv.Vec3(255, 255, 0), // Yellow crosshair
+                2
+              );
+            }
+          }
+        });
       }
       
       // Encode to JPEG buffer

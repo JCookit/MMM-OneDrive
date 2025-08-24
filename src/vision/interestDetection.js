@@ -24,6 +24,9 @@ class InterestDetector {
       featurePadding: options.featurePadding || 40,
       clusterDistance: options.clusterDistance || 120,
       
+      // Candidate selection
+      maxCandidates: options.maxCandidates || 3, // Return top N candidates
+      
       // Production thresholds
       minConfidenceThreshold: options.minConfidenceThreshold || 0.65,
       minScoreThreshold: options.minScoreThreshold || 30,
@@ -40,8 +43,10 @@ class InterestDetector {
   }
 
   /**
-   * Main entry point - find most interesting region in image
-   * Returns null if nothing meets confidence thresholds
+   * Main entry point - find most interesting regions in image
+   * Returns array of top N candidates that meet confidence thresholds
+   * @param {cv.Mat} image - OpenCV image matrix
+   * @returns {Promise<Array>} Array of interest region candidates, sorted by combined score
    */
   async findInterestingRegion(image) {
     const startTime = Date.now();
@@ -108,7 +113,7 @@ class InterestDetector {
         this.log(`Gradient analysis failed: ${error.message}`);
       }
       
-      let bestRegion = null;
+      const topCandidates = [];
       
       if (candidates.length === 0) {
         this.log('No candidates found');
@@ -123,39 +128,49 @@ class InterestDetector {
           confidence: this.calculateAdvancedConfidence(candidate, workingImage, safeZone)
         }));
         
-        // Select best candidate that meets thresholds
+        // Select viable candidates that meet thresholds
         const viableCandidates = candidatesWithConfidence.filter(c => 
           c.confidence >= this.options.minConfidenceThreshold && 
           c.score >= this.options.minScoreThreshold
         );
         
         if (viableCandidates.length > 0) {
-          bestRegion = viableCandidates
-            .sort((a, b) => (b.score * b.confidence) - (a.score * a.confidence))[0];
+          // Sort by combined score (score * confidence) and take top N
+          const sortedCandidates = viableCandidates
+            .sort((a, b) => (b.score * b.confidence) - (a.score * a.confidence))
+            .slice(0, this.options.maxCandidates);
           
-          this.log(`Selected: ${bestRegion.type} (score: ${bestRegion.score.toFixed(1)}, confidence: ${bestRegion.confidence.toFixed(2)})`);
+          // Scale back to original coordinates and add processing metadata
+          sortedCandidates.forEach((candidate, index) => {
+            if (scale !== 1.0) {
+              candidate.x = Math.round(candidate.x / scale);
+              candidate.y = Math.round(candidate.y / scale);
+              candidate.width = Math.round(candidate.width / scale);
+              candidate.height = Math.round(candidate.height / scale);
+            }
+            
+            candidate.processingTime = Date.now() - startTime;
+            candidate.method = 'interest_detection';
+            candidate.rank = index + 1; // Add ranking information
+          });
           
-          // Scale back to original coordinates
-          if (scale !== 1.0) {
-            bestRegion.x = Math.round(bestRegion.x / scale);
-            bestRegion.y = Math.round(bestRegion.y / scale);
-            bestRegion.width = Math.round(bestRegion.width / scale);
-            bestRegion.height = Math.round(bestRegion.height / scale);
-          }
+          topCandidates.push(...sortedCandidates);
           
-          bestRegion.processingTime = Date.now() - startTime;
-          bestRegion.method = 'interest_detection';
+          this.log(`Selected ${topCandidates.length} candidates:`);
+          topCandidates.forEach((candidate, i) => {
+            this.log(`  #${i + 1}: ${candidate.type} (score: ${candidate.score.toFixed(1)}, confidence: ${candidate.confidence.toFixed(2)})`);
+          });
           
         } else {
           this.log(`No candidates met thresholds (min confidence: ${this.options.minConfidenceThreshold}, min score: ${this.options.minScoreThreshold})`);
         }
       }
       
-      return bestRegion;
+      return topCandidates;
       
     } catch (error) {
       console.error(`[InterestDetection] Error processing image: ${error.message}`);
-      return null;
+      return [];
     } finally {
       // CRITICAL: Release Mat objects
       safeRelease(workingImage, 'working image');
@@ -599,7 +614,7 @@ class InterestDetector {
    * Detect interest regions from image buffer
    * Convenience method that handles buffer-to-image conversion
    * @param {Buffer} imageBuffer - Image data as Buffer
-   * @returns {Promise<Object|null>} Interest detection result with focal point
+   * @returns {Promise<Object|null>} Interest detection result with candidates array
    */
   async detectInterestRegions(imageBuffer) {
     const cv = require('@u4/opencv4nodejs');
@@ -626,30 +641,51 @@ class InterestDetector {
       
       console.log(`[InterestDetector] Image decoded: ${image.cols}x${image.rows} pixels`);
       
-      // Use the existing interest detection
-      const interestResult = await this.findInterestingRegion(image);
+      // Use the existing interest detection (now returns array)
+      const interestCandidates = await this.findInterestingRegion(image);
       
-      if (interestResult) {
-        const focalPoint = {
-          x: interestResult.x,
-          y: interestResult.y,
-          width: interestResult.width,
-          height: interestResult.height,
-          type: 'interest',
-          method: 'interest_detection',
-          score: interestResult.score
-        };
+      if (interestCandidates && interestCandidates.length > 0) {
+        // Convert each candidate to the expected format
+        const candidates = interestCandidates.map(candidate => ({
+          x: candidate.x,
+          y: candidate.y,
+          width: candidate.width,
+          height: candidate.height,
+          confidence: candidate.confidence,
+          score: candidate.score,
+          type: candidate.type || 'interest',
+          method: candidate.method || 'interest_detection',
+          rank: candidate.rank || 1
+        }));
         
-        console.log(`[InterestDetector] Interest region found: score=${interestResult.score}`);
-        return { focalPoint, interestResult };
+        console.log(`[InterestDetector] Found ${candidates.length} interest region candidates`);
+        candidates.forEach((candidate, i) => {
+          console.log(`[InterestDetector]   #${i + 1}: ${candidate.type} (confidence: ${candidate.confidence.toFixed(2)}, score: ${candidate.score.toFixed(1)})`);
+        });
+        
+        // Return in format expected by vision-worker
+        return { 
+          candidates: candidates,
+          // Keep legacy fields for backward compatibility
+          focalPoint: candidates[0], // First candidate as primary focal point
+          confidence: candidates[0].confidence
+        };
       }
       
       console.log(`[InterestDetector] No interest regions found`);
-      return null;
+      return { 
+        candidates: [],
+        focalPoint: null,
+        confidence: 0
+      };
       
     } catch (error) {
       console.error(`[InterestDetector] Interest region detection failed:`, error.message);
-      return null;
+      return { 
+        candidates: [],
+        focalPoint: null,
+        confidence: 0
+      };
     } finally {
       // CRITICAL: Release the decoded image
       safeRelease(image, 'decoded image');
