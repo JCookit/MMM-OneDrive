@@ -681,6 +681,45 @@ const nodeHelperObject = {
   findInterestingRectangle: async function(imageBuffer, filename) {
     console.log(`[NodeHelper] 🎯 Finding focal point for: ${filename || 'unknown'}`);
     
+    // First, check if we have cached vision results for this photo
+    const photo = this.localPhotoList.find(p => p.filename === filename);
+    if (photo && photo._visionResults) {
+      console.log(`[NodeHelper] 💾 Found cached vision results for: ${filename}`);
+      console.log(`[NodeHelper] 💾 Cache info: faces=${photo._visionResults.faces?.length || 0}, interests=${photo._visionResults.interestRegions?.length || 0}, error=${photo._visionResults.error}, shouldRetry=${photo._visionResults.shouldRetry}`);
+      
+      // Check if cached result was an error - if so, retry the analysis
+      if (photo._visionResults.error && photo._visionResults.shouldRetry) {
+        console.log(`[NodeHelper] 🔄 Cached result was an error with retry flag, attempting analysis again`);
+        // Continue to vision processing below
+      } else if (photo._visionResults.error && !photo._visionResults.shouldRetry) {
+        console.log(`[NodeHelper] ❌ Using cached permanent error result`);
+        // Use cached error result (don't retry permanent errors)
+        return await createCenterFallback(imageBuffer, photo._visionResults.errorReason || 'cached_error');
+      } else {
+        console.log(`[NodeHelper] ✅ Using cached vision detection results - recomputing focal point selection`);
+        // Use cached raw detection results but recompute focal point selection
+        const cachedDetectionResult = {
+          faces: photo._visionResults.faces || [],
+          interestRegions: photo._visionResults.interestRegions || [],
+          debugImageBase64: photo._visionResults.debugImageBase64
+        };
+        
+        // Recompute focal point decision from cached detections
+        const focalPointResult = await this.chooseFocalPointFromDetections(cachedDetectionResult, imageBuffer, filename);
+        
+        return {
+          focalPoint: focalPointResult.focalPoint,
+          method: focalPointResult.method,
+          debugImageBase64: focalPointResult.debugImageBase64,
+          cached: true
+        };
+      }
+    } else {
+      console.log(`[NodeHelper] 🆕 No cached vision results found, performing fresh analysis`);
+    }
+    
+    let visionResult = null;
+    
     try {
       // Check if face detection is disabled in config (defaults to enabled if not specified)
       const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
@@ -707,23 +746,87 @@ const nodeHelperObject = {
           if (result.error) {
             console.log(`[NodeHelper] ⚠️ Vision worker returned error: ${result.error}`);
             console.log(`[NodeHelper] Using center fallback instead`);
-            return await createCenterFallback(imageBuffer, 'worker_error');
+            
+            visionResult = await createCenterFallback(imageBuffer, 'worker_error');
+            
+            // Cache this error result but mark for retry (transient error)
+            if (photo) {
+              photo._visionResults = {
+                // No detection data for error cases
+                faces: [],
+                interestRegions: [],
+                debugImageBase64: null,
+                
+                // Error metadata
+                error: true,
+                shouldRetry: true, // Worker errors might be transient
+                errorReason: 'worker_error',
+                errorMessage: result.error,
+                timestamp: Date.now()
+              };
+              console.log(`[NodeHelper] 💾 Caching worker error result (will retry): ${result.error}`);
+              // Save updated photo list to persist cache
+              this.savePhotoListCache();
+            }
+            
+            return visionResult;
           }
           
           console.log(`[NodeHelper] ✅ Vision worker completed in ${processingTime}ms`);
           console.log(`[NodeHelper] Detection results: ${result.faces.length} faces, ${result.interestRegions.length} interest regions`);
           
           // Make focal point decision from the detection results
-          const focalPointResult = await this.chooseFocalPointFromDetections(result, imageBuffer, filename);
-          console.log(`[NodeHelper] Final focal point decision: method=${focalPointResult.method}`);
+          visionResult = await this.chooseFocalPointFromDetections(result, imageBuffer, filename);
+          console.log(`[NodeHelper] Final focal point decision: method=${visionResult.method}`);
           
-          return focalPointResult;
+          // Cache raw detection results (not the final focal point decision)
+          if (photo) {
+            photo._visionResults = {
+              // Store raw detection data
+              faces: result.faces || [],
+              interestRegions: result.interestRegions || [],
+              debugImageBase64: result.debugImageBase64,
+              
+              // Metadata
+              error: false,
+              shouldRetry: false,
+              analysisComplete: true,
+              timestamp: Date.now(),
+              processingTime: processingTime
+            };
+            console.log(`[NodeHelper] 💾 Caching raw vision detection results: ${result.faces.length} faces, ${result.interestRegions.length} interests`);
+            // Save updated photo list to persist cache
+            this.savePhotoListCache();
+          }
+          
+          return visionResult;
         } else {
           throw new Error(`Unexpected vision worker response: ${response.type}`);
         }
       } else {
         console.warn("[NodeHelper] Vision worker not ready, using fallback processing...");
-        return await createCenterFallback(imageBuffer, 'worker_not_ready')
+        visionResult = await createCenterFallback(imageBuffer, 'worker_not_ready');
+        
+        // Cache this fallback result but mark for retry (worker might come online later)
+        if (photo) {
+          photo._visionResults = {
+            // No detection data for error cases
+            faces: [],
+            interestRegions: [],
+            debugImageBase64: null,
+            
+            // Error metadata
+            error: true,
+            shouldRetry: true, // Worker not ready is transient
+            errorReason: 'worker_not_ready',
+            timestamp: Date.now()
+          };
+          console.log(`[NodeHelper] 💾 Caching worker-not-ready result (will retry)`);
+          // Save updated photo list to persist cache
+          this.savePhotoListCache();
+        }
+        
+        return visionResult;
       }
       
     } catch (error) {
@@ -731,7 +834,29 @@ const nodeHelperObject = {
       console.log(`[NodeHelper] Using center fallback due to error`);
       
       // Return center fallback on any error
-      return await createCenterFallback(imageBuffer, 'error_fallback');
+      visionResult = await createCenterFallback(imageBuffer, 'error_fallback');
+      
+      // Cache this error result but mark for retry (errors might be transient)
+      if (photo) {
+        photo._visionResults = {
+          // No detection data for error cases
+          faces: [],
+          interestRegions: [],
+          debugImageBase64: null,
+          
+          // Error metadata
+          error: true,
+          shouldRetry: true, // Processing errors might be transient
+          errorReason: 'processing_error',
+          errorMessage: error.message,
+          timestamp: Date.now()
+        };
+        console.log(`[NodeHelper] 💾 Caching processing error result (will retry): ${error.message}`);
+        // Save updated photo list to persist cache
+        this.savePhotoListCache();
+      }
+      
+      return visionResult;
     }
   },
 

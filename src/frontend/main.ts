@@ -510,19 +510,18 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       {
         // 10% - Fade in complete, still at focal point
         opacity: 1,
-        transform: `scale(${startScale}) translate(${startTranslateX}%, ${startTranslateY}%)`,
         offset: 0.1
       },
       {
         // 90% - Still visible, animated to normal position and scale
         opacity: 1,
-        transform: `scale(1.0) translate(0%, 0%)`,
-        offset: 0.9
+        offset: 0.88
       },
       {
         // 100% - Fade out complete
         opacity: 0,
-        transform: `scale(1.0) translate(0%, 0%)`
+        transform: `scale(1.0) translate(0%, 0%)`,
+        offset: 0.98 // cut it a little short to allow for pi slowness
       }
     ];
 
