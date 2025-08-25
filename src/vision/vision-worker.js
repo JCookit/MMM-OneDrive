@@ -5,7 +5,7 @@
  * to prevent OpenCV crashes from taking down the main MagicMirror process.
  * 
  * Complete processing pipeline:
- * 1. Face Detection (YOLO or Haar)  
+ * 1. Face Detection (YOLO)  
  * 2. Interest Region Detection (fallback)
  * 3. Center Focal Point (final fallback)
  * 

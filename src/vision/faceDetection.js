@@ -11,9 +11,6 @@ const { trackMat, safeRelease, logMatMemory } = require('./matManager');
 
 // Configuration constants for face detection
 const FACE_DETECTION_CONFIG = {
-  // Detection method: 'yolo' or 'haar'
-  METHOD: 'yolo', // YOLO for best accuracy, fallback to haar
-  
   // YOLO Configuration
   YOLO_CONFIDENCE_THRESHOLD: 0.6, // Increased from 0.4 to 0.6
   YOLO_NMS_THRESHOLD: 0.5,
@@ -22,20 +19,12 @@ const FACE_DETECTION_CONFIG = {
   // Face size filtering (percentage of image dimensions)
   MIN_FACE_SIZE_PERCENT: 0.05, // Ignore faces smaller than 5% of image width/height
   
-  // Haar Configuration (fallback)
-  HAAR_SCALE_FACTOR: 1.05,
-  HAAR_MIN_NEIGHBORS: 3,
-  HAAR_MIN_SIZE: 80,
-  HAAR_MAX_SIZE: 400,
-  
   // Focal point expansion (percentage of face size)
   FOCAL_AREA_EXPANSION: 0.5,
 };
 
 class FaceDetector {
   constructor() {
-    this.method = FACE_DETECTION_CONFIG.METHOD;
-    
     // Initialize Interest Detector for fallback when no faces found
     this.interestDetector = new InterestDetector({
       sizeMode: 'adaptive', // Balanced sizing
@@ -44,38 +33,27 @@ class FaceDetector {
       enableDebugLogs: false // Set to true for detailed logging
     });
     
-    // Initialize Haar cascade (always available as fallback)
+    // Initialize YOLO model
     try {
-      this.faceCascade = new cv.CascadeClassifier(cv.HAAR_FRONTALFACE_ALT2);
-    } catch (error) {
-      console.error('[FaceDetector] Failed to load face cascade:', error);
-      throw new Error('Could not initialize Haar face detector');
-    }
-    
-    // Initialize YOLO model if method is set to 'yolo'
-    if (this.method === 'yolo') {
-      try {
-        console.log('[FaceDetector] Loading YOLOv8-face model...');
-        const yoloModelPath = path.join(__dirname, 'models', 'yolo', 'yolov8n-face.onnx');
-        
-        // Verify YOLO model exists
-        const fs = require('fs');
-        if (!fs.existsSync(yoloModelPath)) {
-          throw new Error(`YOLO model file not found: ${yoloModelPath}`);
-        }
-        
-        this.yoloNet = cv.readNetFromONNX(yoloModelPath);
-        this.yoloNet.setPreferableBackend(cv.DNN_BACKEND_OPENCV);
-        this.yoloNet.setPreferableTarget(cv.DNN_TARGET_CPU);
-        console.log('[FaceDetector] YOLOv8-face model loaded successfully');
-      } catch (error) {
-        console.warn('[FaceDetector] Failed to load YOLO model, falling back to Haar:', error.message);
-        this.method = 'haar'; // Fallback to Haar
-        this.yoloNet = null;
+      console.log('[FaceDetector] Loading YOLOv8-face model...');
+      const yoloModelPath = path.join(__dirname, 'models', 'yolo', 'yolov8n-face.onnx');
+      
+      // Verify YOLO model exists
+      const fs = require('fs');
+      if (!fs.existsSync(yoloModelPath)) {
+        throw new Error(`YOLO model file not found: ${yoloModelPath}`);
       }
+      
+      this.yoloNet = cv.readNetFromONNX(yoloModelPath);
+      this.yoloNet.setPreferableBackend(cv.DNN_BACKEND_OPENCV);
+      this.yoloNet.setPreferableTarget(cv.DNN_TARGET_CPU);
+      console.log('[FaceDetector] YOLOv8-face model loaded successfully');
+    } catch (error) {
+      console.error('[FaceDetector] Failed to load YOLO model:', error.message);
+      throw new Error('Could not initialize YOLO face detector - required for operation');
     }
     
-    console.log(`[FaceDetector] Initialized using ${this.method} detection method`);
+    console.log(`[FaceDetector] Initialized using YOLO detection method`);
   }
 
   /**
@@ -259,72 +237,6 @@ class FaceDetector {
   }
 
 
-
-  /**
-   * Detect faces using Haar cascades
-   * @param {cv.Mat} image - OpenCV image (color)
-   * @returns {Array} Array of face objects
-   */
-  async detectFacesHaar(image) {
-    let grayImage = null;
-    try {
-      grayImage = image.bgrToGray();
-
-      // Detect faces with configured parameters
-      const detectParams = {
-        scaleFactor: FACE_DETECTION_CONFIG.HAAR_SCALE_FACTOR,
-        minNeighbors: FACE_DETECTION_CONFIG.HAAR_MIN_NEIGHBORS,
-        minSize: new cv.Size(FACE_DETECTION_CONFIG.HAAR_MIN_SIZE, FACE_DETECTION_CONFIG.HAAR_MIN_SIZE),
-        maxSize: new cv.Size(FACE_DETECTION_CONFIG.HAAR_MAX_SIZE, FACE_DETECTION_CONFIG.HAAR_MAX_SIZE)
-      };
-
-      const faceRects = this.faceCascade.detectMultiScale(
-        grayImage,
-        detectParams.scaleFactor,
-        detectParams.minNeighbors,
-        0,
-        detectParams.minSize,
-        detectParams.maxSize
-      );
-
-      console.log(`[FaceDetector] Haar found ${faceRects.objects.length} faces`);
-
-      // Convert OpenCV rectangles to our format with validation
-      const faces = faceRects.objects
-        .map((rect, index) => {
-          const isValid = rect.x >= 0 && rect.y >= 0 && 
-                         rect.width > 0 && rect.height > 0 &&
-                         rect.x + rect.width <= image.cols &&
-                         rect.y + rect.height <= image.rows;
-          
-          const face = {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-            confidence: 1.0, // Haar cascades don't provide confidence
-            isValid,
-            aspectRatio: rect.width / rect.height
-          };
-          
-          if (!isValid) {
-            console.warn(`[FaceDetector] Invalid Haar face rectangle ${index}:`, face);
-          }
-          
-          return face;
-        })
-        .filter(face => face.isValid);
-      
-      return faces;
-      
-    } catch (error) {
-      console.error('[FaceDetector] Haar detection failed:', error);
-      throw error;
-    } finally {
-      // CRITICAL: Release the decoded image
-      safeRelease(grayImage, 'Haar gray image');
-    }
-  }
 
   /**
    * Filter faces by minimum size threshold
@@ -689,29 +601,14 @@ class FaceDetector {
       image = await this.loadImageFromBuffer(imageBuffer);
       trackMat(image, 'decoded image');
       
-      // Detect faces using selected method
+      // Detect faces using YOLO
       let faces = [];
-      if (this.method === 'yolo' && this.yoloNet) {
-        try {
-          console.log(`[FaceDetector] Using YOLO detection`);
-          faces = await this.detectFacesYOLO(image);
-          
-          // If YOLO finds no faces, try Haar as fallback for better coverage
-          if (faces.length === 0) {
-            console.log(`[FaceDetector] YOLO found no faces, trying Haar fallback...`);
-            const haarFaces = await this.detectFacesHaar(image);
-            if (haarFaces.length > 0) {
-              console.log(`[FaceDetector] Haar fallback found ${haarFaces.length} faces`);
-              faces = haarFaces;
-            }
-          }
-        } catch (error) {
-          console.warn('[FaceDetector] YOLO failed, falling back to Haar:', error.message);
-          faces = await this.detectFacesHaar(image);
-        }
-      } else {
-        console.log(`[FaceDetector] Using Haar detection`);
-        faces = await this.detectFacesHaar(image);
+      try {
+        console.log(`[FaceDetector] Using YOLO detection`);
+        faces = await this.detectFacesYOLO(image);
+      } catch (error) {
+        console.error('[FaceDetector] YOLO detection failed:', error.message);
+        throw error; // Don't fall back, let the error propagate
       }
       
       // Filter faces by size
