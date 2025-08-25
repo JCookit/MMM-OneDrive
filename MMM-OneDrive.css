@@ -61,6 +61,7 @@
   background-color: rgba(0, 0, 0, 0.5);
   padding: 10px;
   border-radius: 4px;
+  border-left: 4px solid #ffffff;
   line-height: 100%;
   text-align: left;
 }

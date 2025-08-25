@@ -138,6 +138,83 @@ Module.register<Config>("MMM-OneDrive", {
     });
   },
 
+  /**
+   * Find the most vibrant non-grey/white/brown color for UI theming
+   * @param dominantColors - Array of dominant colors from vision analysis
+   * @returns Object with vibrant color info or null if none found
+   */
+  getMostVibrantColor: function(dominantColors: any[]): any {
+    if (!dominantColors || dominantColors.length === 0) {
+      return null;
+    }
+
+    // Helper function to check if a color is "boring" (grey, white, brown)
+    const isBoringColor = (color: any) => {
+      const { h, s, v } = color.hsv || { h: 0, s: 0, v: 0 };
+      
+      // Very low saturation = grey/white (regardless of hue)
+      if (s < 0.2) return true;
+      
+      // Very high brightness + low saturation = white-ish
+      if (v > 0.9 && s < 0.3) return true;
+      
+      // Brown-ish colors (hue between 20-60 degrees with low saturation)
+      if (h >= 20 && h <= 60 && s < 0.3) return true;
+      
+      return false;
+    };
+
+    // Find vibrant colors, sorted by vibrancy score
+    const vibrantColors = dominantColors
+      .filter(color => !isBoringColor(color))
+      .map(color => ({
+        ...color,
+        vibrancyScore: (color.hsv?.s || 0) * (color.hsv?.v || 0) * (color.unifiedScore || 0) // Saturation × Brightness × Importance
+      }))
+      .sort((a, b) => b.vibrancyScore - a.vibrancyScore);
+
+    return vibrantColors.length > 0 ? vibrantColors[0] : null;
+  },
+
+  /**
+   * Apply default or themed styling to photo info elements
+   * @param info - Info container element
+   * @param photoTime - Time element  
+   * @param photoLocation - Location element
+   * @param vibrantColor - Optional vibrant color for theming
+   */
+  applyPhotoInfoStyling: function(info: HTMLElement, photoTime: HTMLElement, photoLocation: HTMLElement, vibrantColor?: any): void {
+    if (vibrantColor) {
+      // Use vibrant color theming
+      const themeColor = vibrantColor.hexColor;
+      
+      // Create a darker version for background (darken RGB values, keep high opacity)
+      const rgb = vibrantColor.rgb || [100, 100, 100];
+      const darkenedRgb = rgb.map(channel => Math.max(0, Math.round(channel * 0.5))); // Darken to 30% of original
+      const darkBackground = `rgba(${darkenedRgb[0]}, ${darkenedRgb[1]}, ${darkenedRgb[2]}, 0.8)`; // High opacity
+      
+      // Apply themed styling
+      info.style.borderLeft = `4px solid ${themeColor}`;
+      info.style.backgroundColor = darkBackground;
+      
+      console.debug(`[MMM-OneDrive] Applied vibrant theming: ${themeColor} with darkened background`);
+    } else {
+      // Fallback: white border with dark background
+      info.style.borderLeft = '4px solid white';
+      info.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+      
+      console.debug("[MMM-OneDrive] Using default white border theming");
+    }
+    
+    // Always apply consistent text styling
+    photoTime.style.color = 'white';
+    photoTime.style.fontWeight = 'bold';
+    if (photoLocation.innerHTML) {
+      photoLocation.style.color = 'white';
+      photoLocation.style.fontWeight = 'normal';
+    }
+  },
+
   socketNotificationReceived: function (noti, payload) {
     if (noti === "ERROR") {
       const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
@@ -750,33 +827,11 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       info.style.setProperty("--left", String(left));
       info.style.setProperty("--bottom", String(bottom));
       info.style.setProperty("--right", String(right));
+    } else {
+      info.style.setProperty("--bottom", "10px");
+      info.style.setProperty("--right", "10px");
     }
     info.innerHTML = "";
-    
-    // Detect if this photo is from a folder vs an album
-    // const isFromFolder = target._folderId && !album.bundle;
-    
-    // let sourceIcon, sourceTitle;
-    
-    // if (isFromFolder) {
-    //   // Create folder icon instead of album cover
-    //   sourceIcon = document.createElement("div");
-    //   sourceIcon.classList.add("folderIcon");
-    //   sourceIcon.innerHTML = ""; // Empty - icon created with CSS
-      
-    //   sourceTitle = document.createElement("div");
-    //   sourceTitle.classList.add("folderTitle");
-    //   sourceTitle.innerHTML = album.name; // Folder name
-    // } else {
-    //   // Create album cover (existing behavior)
-    //   sourceIcon = document.createElement("div");
-    //   sourceIcon.classList.add("albumCover");
-    //   sourceIcon.style.backgroundImage = `url(modules/MMM-OneDrive/cache/${album.id})`;
-      
-    //   sourceTitle = document.createElement("div");
-    //   sourceTitle.classList.add("albumTitle");
-    //   sourceTitle.innerHTML = album.name; // Album name
-    // }
     
     const photoTime = document.createElement("div");
     photoTime.classList.add("photoTime");
@@ -805,36 +860,25 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       }
     }
     
-    // Apply intelligent text colors from color analysis if available
+    // Apply new color theming: vibrant color for border/background, white text with bold date
     if (visionResults?.colorAnalysis?.dominantColors?.length > 0) {
       try {
-        const textColors = this.getTextFriendlyColors(visionResults.colorAnalysis.dominantColors, 2);
-        
-        // Apply date color (first color)
-        if (textColors[0]) {
-          photoTime.style.color = textColors[0].hexColor;
-          console.debug(`[MMM-OneDrive] Applied date color: ${textColors[0].hexColor}${textColors[0].wasBrightened ? ' (brightened)' : ''}`);
-        }
-        
-        // Apply location color (second color)
-        if (textColors[1] && photoLocation.innerHTML) {
-          photoLocation.style.color = textColors[1].hexColor;
-          console.debug(`[MMM-OneDrive] Applied location color: ${textColors[1].hexColor}${textColors[1].wasBrightened ? ' (brightened)' : ''}`);
-        }
+        const vibrantColor = this.getMostVibrantColor(visionResults.colorAnalysis.dominantColors);
+        this.applyPhotoInfoStyling(info, photoTime, photoLocation, vibrantColor);
         
       } catch (error) {
-        console.warn("[MMM-OneDrive] Failed to apply text colors:", error);
-        // Fallback to default colors - no action needed, CSS will handle it
+        console.warn("[MMM-OneDrive] Failed to apply color theming:", error);
+        // Fallback to default styling
+        this.applyPhotoInfoStyling(info, photoTime, photoLocation);
       }
     } else {
-      console.debug("[MMM-OneDrive] No color analysis available, using default text colors");
+      // No color analysis available, use default theming
+      this.applyPhotoInfoStyling(info, photoTime, photoLocation);
     }
     
     const infoText = document.createElement("div");
     infoText.classList.add("infoText");
 
-    // info.appendChild(sourceIcon);
-    // infoText.appendChild(sourceTitle);
     infoText.appendChild(photoTime);
     if (photoLocation.innerHTML) {
       infoText.appendChild(photoLocation);
