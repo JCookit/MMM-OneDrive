@@ -585,7 +585,7 @@ const nodeHelperObject = {
    * This implements the decision-making logic that was previously in the worker
    */
   chooseFocalPointFromDetections: async function(detectionResults, imageBuffer, filename) {
-    const { faces, interestRegions, debugImageBase64 } = detectionResults;
+    const { faces, interestRegions, colorAnalysis, debugImageBase64 } = detectionResults;
     
     console.log(`[NodeHelper] 🎯 Choosing focal point from ${faces.length} faces and ${interestRegions.length} interest regions`);
     
@@ -637,6 +637,7 @@ const nodeHelperObject = {
       return {
         focalPoint: focalPoint,
         method: focalPoint.method,
+        colorAnalysis: colorAnalysis,
         debugImageBase64: debugImageBase64
       };
     }
@@ -662,6 +663,7 @@ const nodeHelperObject = {
           confidence: bestInterest.confidence
         },
         method: 'interest_detection',
+        colorAnalysis: colorAnalysis,
         debugImageBase64: debugImageBase64
       };
     }
@@ -674,6 +676,7 @@ const nodeHelperObject = {
     return {
       focalPoint: centerFallback.focalPoint,
       method: centerFallback.method,
+      colorAnalysis: colorAnalysis,
       debugImageBase64: debugImageBase64
     };
   },
@@ -685,7 +688,7 @@ const nodeHelperObject = {
     const photo = this.localPhotoList.find(p => p.filename === filename);
     if (photo && photo._visionResults) {
       console.log(`[NodeHelper] 💾 Found cached vision results for: ${filename}`);
-      console.log(`[NodeHelper] 💾 Cache info: faces=${photo._visionResults.faces?.length || 0}, interests=${photo._visionResults.interestRegions?.length || 0}, error=${photo._visionResults.error}, shouldRetry=${photo._visionResults.shouldRetry}`);
+      console.log(`[NodeHelper] 💾 Cache info: faces=${photo._visionResults.faces?.length || 0}, interests=${photo._visionResults.interestRegions?.length || 0}, colors=${photo._visionResults.colorAnalysis?.dominantColors?.length || 0}, error=${photo._visionResults.error}, shouldRetry=${photo._visionResults.shouldRetry}`);
       
       // Check if cached result was an error - if so, retry the analysis
       if (photo._visionResults.error && photo._visionResults.shouldRetry) {
@@ -701,6 +704,7 @@ const nodeHelperObject = {
         const cachedDetectionResult = {
           faces: photo._visionResults.faces || [],
           interestRegions: photo._visionResults.interestRegions || [],
+          colorAnalysis: photo._visionResults.colorAnalysis || null,
           debugImageBase64: photo._visionResults.debugImageBase64
         };
         
@@ -710,6 +714,7 @@ const nodeHelperObject = {
         return {
           focalPoint: focalPointResult.focalPoint,
           method: focalPointResult.method,
+          colorAnalysis: focalPointResult.colorAnalysis,
           debugImageBase64: focalPointResult.debugImageBase64,
           cached: true
         };
@@ -785,6 +790,7 @@ const nodeHelperObject = {
               // Store raw detection data
               faces: result.faces || [],
               interestRegions: result.interestRegions || [],
+              colorAnalysis: result.colorAnalysis || null,
               debugImageBase64: result.debugImageBase64,
               
               // Metadata
@@ -794,7 +800,7 @@ const nodeHelperObject = {
               timestamp: Date.now(),
               processingTime: processingTime
             };
-            console.log(`[NodeHelper] 💾 Caching raw vision detection results: ${result.faces.length} faces, ${result.interestRegions.length} interests`);
+            console.log(`[NodeHelper] 💾 Caching raw vision detection results: ${result.faces.length} faces, ${result.interestRegions.length} interests, colors: ${result.colorAnalysis?.dominantColors?.length || 0}`);
             // Save updated photo list to persist cache
             this.savePhotoListCache();
           }

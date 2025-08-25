@@ -22,12 +22,14 @@ const cv = require('@u4/opencv4nodejs');
 // Import vision processing modules  
 const { FaceDetector } = require('./faceDetection');
 const InterestDetector = require('./interestDetection');
+const ColorAnalyzer = require('./colorAnalysis');
 const { trackMat, safeRelease, logMatMemory, getMatStats } = require('./matManager');
 
 class VisionWorker {
   constructor() {
     this.faceDetector = null;
     this.interestDetector = null;
+    this.colorAnalyzer = null;
     this.isInitialized = false;
     this.config = {};
     
@@ -58,6 +60,15 @@ class VisionWorker {
         minConfidenceThreshold: 0.65,
         minScoreThreshold: 30,
         enableDebugLogs: false
+      });
+      
+      // Initialize Color Analyzer
+      this.colorAnalyzer = new ColorAnalyzer({
+        maxColors: 5, // Return top 3 dominant colors
+        kClusters: 6, // Use 4 clusters for better color separation
+        maxImageSize: 800, // Resize large images for performance
+        minColorPercentage: 0.01, // Lower threshold - ignore colors < 2%
+        enableDebugLogs: true // Enable debug logging to diagnose issue
       });
       
       this.isInitialized = true;
@@ -205,11 +216,23 @@ class VisionWorker {
       let result;
       
       if (!faceDetectionEnabled) {
-        // Face detection disabled - return empty results for main process to handle
-        console.log(`[VisionWorker] 🎬 Face detection disabled in config - returning empty results`);
+        // Face detection disabled - still run color analysis
+        console.log(`[VisionWorker] 🎬 Face detection disabled in config - running color analysis only`);
+        
+        // Run color analysis
+        let colorAnalysis = null;
+        try {
+          console.debug(`[VisionWorker] Running color analysis...`);
+          colorAnalysis = await this.colorAnalyzer.analyzeColors(imageBuffer);
+          console.debug(`[VisionWorker] Color analysis completed`);
+        } catch (colorError) {
+          console.error(`[VisionWorker] Color analysis failed:`, colorError.message);
+        }
+        
         result = {
           faces: [],
           interestRegions: [],
+          colorAnalysis: colorAnalysis,
           debugImageBase64: null
         };
       } else {
@@ -264,7 +287,7 @@ class VisionWorker {
   async performCompleteVisionProcessing(imageBuffer, filename) {
     console.debug(`[VisionWorker] 🔄 Starting complete vision pipeline for ${filename || 'unknown'}`);
     
-    if (!this.isInitialized || !this.faceDetector || !this.interestDetector) {
+    if (!this.isInitialized || !this.faceDetector || !this.interestDetector || !this.colorAnalyzer) {
       throw new Error('Vision processors not initialized');
     }
     
@@ -323,12 +346,32 @@ class VisionWorker {
     
     console.log(`[VisionWorker] ✅ Detection completed: ${faces.length} faces, ${interestRegions.length} interest regions`);
     
-    // Step 3: Create debug image if requested
+    // Step 3: Color analysis (always run if enabled)
+    let colorAnalysis = null;
+    try {
+      console.debug(`[VisionWorker] Step 3: Running color analysis...`);
+      colorAnalysis = await this.colorAnalyzer.analyzeColors(imageBuffer);
+      
+      if (colorAnalysis && colorAnalysis.dominantColors) {
+        console.debug(`[VisionWorker] Color analysis found ${colorAnalysis.dominantColors.length} dominant colors`);
+        colorAnalysis.dominantColors.forEach((color, i) => {
+          console.debug(`[VisionWorker]   #${i + 1}: ${color.hexColor} (${(color.percentage * 100).toFixed(1)}%)`);
+        });
+      } else {
+        console.debug(`[VisionWorker] Color analysis found no dominant colors`);
+      }
+      
+    } catch (colorError) {
+      console.error(`[VisionWorker] Color analysis failed:`, colorError.message);
+      // Continue without color analysis
+    }
+    
+    // Step 4: Create debug image if requested
     let debugImageBase64 = null;
     if (this.config?.debugMode) {
       try {
-        console.debug(`[VisionWorker] Creating debug image for ${filename || 'unknown'} (${faces.length} faces, ${interestRegions.length} interests)`);
-        debugImageBase64 = await this.createDebugImage(imageBuffer, faces, interestRegions);
+        console.debug(`[VisionWorker] Creating debug image for ${filename || 'unknown'} (${faces.length} faces, ${interestRegions.length} interests, colors: ${colorAnalysis?.dominantColors?.length || 0})`);
+        debugImageBase64 = await this.createDebugImage(imageBuffer, faces, interestRegions, colorAnalysis);
         console.debug(`[VisionWorker] Debug image created successfully`);
       } catch (debugError) {
         console.warn(`[VisionWorker] Debug image creation failed:`, debugError.message);
@@ -338,18 +381,20 @@ class VisionWorker {
     return {
       faces,
       interestRegions,
+      colorAnalysis,
       debugImageBase64
     };
   }
 
   /**
-   * Create debug image with face boxes and interest region overlays
+   * Create debug image with face boxes, interest region overlays, and color swatches
    * @param {Buffer} imageBuffer - Original image buffer
    * @param {Array} faces - Array of face detection results
    * @param {Array} interestRegions - Array of interest region candidates (ordered by confidence)
+   * @param {Object} colorAnalysis - Color analysis results with dominant colors
    * @returns {Promise<string>} Base64 encoded debug image
    */
-  async createDebugImage(imageBuffer, faces, interestRegions) {
+  async createDebugImage(imageBuffer, faces, interestRegions, colorAnalysis) {
     let debugImage = null;
     
     try {
@@ -462,6 +507,99 @@ class VisionWorker {
         });
       }
       
+      // Draw color swatches in center of image if color analysis available
+      if (colorAnalysis && colorAnalysis.dominantColors && colorAnalysis.dominantColors.length > 0) {
+        const swatchSize = 100;
+        const swatchMargin = 5;
+        
+        // Calculate center position
+        const totalSwatchWidth = (colorAnalysis.dominantColors.length * swatchSize) + ((colorAnalysis.dominantColors.length - 1) * swatchMargin);
+        const startX = Math.round((debugImage.cols - totalSwatchWidth) / 2);
+        const startY = Math.round((debugImage.rows - swatchSize) / 2);
+        
+        colorAnalysis.dominantColors.forEach((color, index) => {
+          const swatchX = startX + (index * (swatchSize + swatchMargin));
+          const swatchY = startY;
+          
+          // Draw filled rectangle with the dominant color
+          const topLeft = new cv.Point2(swatchX, swatchY);
+          const bottomRight = new cv.Point2(swatchX + swatchSize, swatchY + swatchSize);
+          
+          // Fill the swatch with the color (OpenCV uses BGR)
+          debugImage.drawRectangle(topLeft, bottomRight, new cv.Vec3(color.bgr[0], color.bgr[1], color.bgr[2]), -1); // -1 means filled
+          
+          // Add border around swatch
+          debugImage.drawRectangle(topLeft, bottomRight, new cv.Vec3(0, 0, 0), 2); // Black border for contrast
+          
+          // Add percentage label below swatch
+          const labelPos = new cv.Point2(swatchX, swatchY + swatchSize + 15);
+          const percentage = (color.percentage * 100).toFixed(0);
+          debugImage.putText(
+            `${percentage}%`,
+            labelPos,
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            new cv.Vec3(0, 0, 0), // Black text with white outline for visibility
+            2
+          );
+          
+          // Add white outline for text visibility
+          debugImage.putText(
+            `${percentage}%`,
+            labelPos,
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            new cv.Vec3(255, 255, 255), // White outline
+            1
+          );
+          
+          // Add hex color label below percentage
+          const hexLabelPos = new cv.Point2(swatchX - 5, swatchY + swatchSize + 30);
+          debugImage.putText(
+            color.hexColor,
+            hexLabelPos,
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.3,
+            new cv.Vec3(0, 0, 0), // Black text
+            2
+          );
+          
+          // Add white outline for hex text
+          debugImage.putText(
+            color.hexColor,
+            hexLabelPos,
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.3,
+            new cv.Vec3(255, 255, 255), // White outline
+            1
+          );
+        });
+        
+        // Add title label above swatches
+        const titleX = startX + Math.round(totalSwatchWidth / 2) - 40; // Center the title
+        const titleY = startY - 10;
+        const titlePos = new cv.Point2(titleX, titleY);
+        
+        debugImage.putText(
+          'Dominant Colors',
+          titlePos,
+          cv.FONT_HERSHEY_SIMPLEX,
+          0.5,
+          new cv.Vec3(0, 0, 0), // Black text
+          2
+        );
+        
+        // White outline for title
+        debugImage.putText(
+          'Dominant Colors',
+          titlePos,
+          cv.FONT_HERSHEY_SIMPLEX,
+          0.5,
+          new cv.Vec3(255, 255, 255), // White outline
+          1
+        );
+      }
+      
       // Encode to JPEG buffer
       const encodedBuffer = cv.imencode('.jpg', debugImage);
       
@@ -502,7 +640,7 @@ class VisionWorker {
     
     const stats = {
       isInitialized: this.isInitialized,
-      hasVisionProcessors: !!(this.faceDetector && this.interestDetector),
+      hasVisionProcessors: !!(this.faceDetector && this.interestDetector && this.colorAnalyzer),
       memoryUsage: process.memoryUsage(),
       uptime: process.uptime(),
       pid: process.pid,
@@ -533,7 +671,7 @@ class VisionWorker {
       uptime: Math.round(process.uptime()),
       pid: process.pid,
       isInitialized: this.isInitialized,
-      hasVisionProcessors: !!(this.faceDetector && this.interestDetector),
+      hasVisionProcessors: !!(this.faceDetector && this.interestDetector && this.colorAnalyzer),
       matStats: getMatStats() // OpenCV Mat object tracking
     };
     

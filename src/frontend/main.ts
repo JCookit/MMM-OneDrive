@@ -88,6 +88,56 @@ Module.register<Config>("MMM-OneDrive", {
     this.requestNextPhoto();
   },
 
+  /**
+   * Extract text-friendly colors from vision analysis results
+   * Only brightens colors if they are too dark for good text readability
+   * @param dominantColors - Array of dominant colors from vision analysis
+   * @param count - Number of text colors to return (default: 2)
+   * @returns Array of text-friendly colors for UI elements
+   */
+  getTextFriendlyColors: function(dominantColors: any[], count: number = 2): any[] {
+    if (!dominantColors || dominantColors.length === 0) {
+      return [];
+    }
+    
+    const BRIGHTNESS_THRESHOLD = 0.45; // Only brighten if below 45% brightness
+    const BRIGHTENING_FACTOR = 0.5;   // Conservative 50% brightening
+    
+    return dominantColors.slice(0, count).map((color: any, index: number) => {
+      const brightness = color.hsv?.v || 0;
+      let finalRgb = [...(color.rgb || [255, 255, 255])];
+      let wasBrightened = false;
+      
+      // Only brighten if the color is too dark for text readability
+      if (brightness < BRIGHTNESS_THRESHOLD) {
+        const [r, g, b] = finalRgb;
+        
+        // Conservative brightening - move toward white by the brightening factor
+        finalRgb = [
+          Math.min(255, Math.round(r + (255 - r) * BRIGHTENING_FACTOR)),
+          Math.min(255, Math.round(g + (255 - g) * BRIGHTENING_FACTOR)),
+          Math.min(255, Math.round(b + (255 - b) * BRIGHTENING_FACTOR))
+        ];
+        
+        wasBrightened = true;
+      }
+      
+      const finalHex = `#${finalRgb.map(c => c.toString(16).padStart(2, '0')).join('')}`;
+      const finalBrightness = (finalRgb[0] + finalRgb[1] + finalRgb[2]) / (3 * 255);
+      
+      return {
+        ...color,
+        rgb: finalRgb,
+        hexColor: finalHex,
+        brightness: finalBrightness,
+        wasBrightened,
+        originalRgb: color.rgb,
+        originalHex: color.hexColor,
+        textRole: index === 0 ? 'date' : 'location', // First for date, second for location
+      };
+    });
+  },
+
   socketNotificationReceived: function (noti, payload) {
     if (noti === "ERROR") {
       const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
@@ -175,10 +225,7 @@ Module.register<Config>("MMM-OneDrive", {
     // Use marked image if face detection was performed and rectangles were burned in
     const displayUrl = interestingRectangleResult?.markedImageUrl || url;
     
-    // Pass face detection focal point if available
-    const focalPoint = interestingRectangleResult?.focalPoint || null;
-    
-    this.render(displayUrl, photo, album, focalPoint);
+    this.render(displayUrl, photo, album, interestingRectangleResult);
     
     // Start next photo processing immediately after consuming cached photo
     this.requestNextPhoto();
@@ -268,11 +315,12 @@ createStaticBackdropKeyframes: function(): void {
   document.head.appendChild(styleElement);
 },
 
-  render: function (url: string, target: OneDriveMediaItem, album: DriveItem, focalPoint?: any) {
+  render: function (url: string, target: OneDriveMediaItem, album: DriveItem, visionResults?: any) {
     if (this.suspended) {
       console.debug("[MMM-OneDrive] Module is suspended, skipping render");
       return;
     }
+    const focalPoint = visionResults?.focalPoint || null;
     const startDt = new Date();
     const back = document.getElementById("ONEDRIVE_PHOTO_BACKDROP");
     const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
@@ -397,7 +445,7 @@ createStaticBackdropKeyframes: function(): void {
       // Allow the default .animated class to apply the trans animation
     }
     
-    this.applyCommonStyling(current, target, album, startDt, this.config.kenBurnsEffect !== false);
+    this.applyCommonStyling(current, target, album, startDt, this.config.kenBurnsEffect !== false, visionResults);
 
   },
 
@@ -522,7 +570,13 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
         opacity: 0,
         transform: `scale(1.0) translate(0%, 0%)`,
         offset: 0.98 // cut it a little short to allow for pi slowness
+      },
+      {
+        // 100% - Fade out complete
+        opacity: 0,
+        transform: `scale(1.0) translate(0%, 0%)`,
       }
+
     ];
 
     // Create the animation
@@ -667,7 +721,7 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
     });
   },
 
-  applyCommonStyling: function(current: HTMLElement, target: OneDriveMediaItem, album: DriveItem, startDt: Date, kenBurnsActive?: boolean): void {
+  applyCommonStyling: function(current: HTMLElement, target: OneDriveMediaItem, album: DriveItem, startDt: Date, kenBurnsActive?: boolean, visionResults?: any): void {
     // ==================== END KEN BURNS EFFECT ==================== 
     
     // Only add animated class if Ken Burns is not active (to avoid animation conflicts)
@@ -749,6 +803,31 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       } else if (location.latitude && location.longitude) {
         photoLocation.innerHTML = `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`;
       }
+    }
+    
+    // Apply intelligent text colors from color analysis if available
+    if (visionResults?.colorAnalysis?.dominantColors?.length > 0) {
+      try {
+        const textColors = this.getTextFriendlyColors(visionResults.colorAnalysis.dominantColors, 2);
+        
+        // Apply date color (first color)
+        if (textColors[0]) {
+          photoTime.style.color = textColors[0].hexColor;
+          console.debug(`[MMM-OneDrive] Applied date color: ${textColors[0].hexColor}${textColors[0].wasBrightened ? ' (brightened)' : ''}`);
+        }
+        
+        // Apply location color (second color)
+        if (textColors[1] && photoLocation.innerHTML) {
+          photoLocation.style.color = textColors[1].hexColor;
+          console.debug(`[MMM-OneDrive] Applied location color: ${textColors[1].hexColor}${textColors[1].wasBrightened ? ' (brightened)' : ''}`);
+        }
+        
+      } catch (error) {
+        console.warn("[MMM-OneDrive] Failed to apply text colors:", error);
+        // Fallback to default colors - no action needed, CSS will handle it
+      }
+    } else {
+      console.debug("[MMM-OneDrive] No color analysis available, using default text colors");
     }
     
     const infoText = document.createElement("div");
