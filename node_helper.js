@@ -328,11 +328,15 @@ const nodeHelperObject = {
   // ==================== VISION WORKER PROCESS MANAGEMENT ====================
 
   initializeVisionWorker: function() {
-    console.log("[NodeHelper] Initializing vision worker process...");
+    console.log("[NodeHelper] Initializing vision worker process with reduced CPU priority...");
     
     const workerPath = path.join(__dirname, 'src/vision/vision-worker.js');
     
-    this.visionWorker = spawn('node', [
+    // Use nice command to spawn the worker with lower CPU priority
+    // nice +10 = lower priority, giving UI thread higher priority for smooth animations
+    this.visionWorker = spawn('nice', [
+      '-n', '10',  // Set nice level to +10 (lower CPU priority)
+      'node',
       '--max-old-space-size=512',  // 512MB memory limit for worker
       workerPath
     ], {
@@ -385,7 +389,7 @@ const nodeHelperObject = {
       this.visionWorkerReady = false;
     });
 
-    console.log(`[NodeHelper] Vision worker process spawned with PID: ${this.visionWorker.pid}`);
+    console.log(`[NodeHelper] Vision worker process spawned with PID: ${this.visionWorker.pid} (nice +10 priority)`);
     
     // Set up periodic health check to detect dead workers
     this.startVisionWorkerHealthCheck();
