@@ -609,17 +609,17 @@ createStaticBackdropKeyframes: function(): void {
         transform: `scale3d(${startScale}, ${startScale}, 1) translate3d(${startTranslateX}%, ${startTranslateY}%, 0)`
       },
       {
-        // 10% - Fade in complete, still at focal point
+        // 10% - Fade in complete
         opacity: 1,
         offset: 0.1
       },
       {
-        // 90% - Still visible, animated to normal position and scale
+        // 90% - Still visible
         opacity: 1,
         offset: 0.88
       },
       {
-        // 100% - Fade out complete
+        // 100% - Fade out complete, final position
         opacity: 0,
         transform: `scale3d(1.0, 1.0, 1) translate3d(0%, 0%, 0)`,
         offset: 0.98 // cut it a little short to allow for pi slowness
@@ -635,7 +635,7 @@ createStaticBackdropKeyframes: function(): void {
     // Create the animation
     const animation = elementToAnimate.animate(keyframes, {
       duration: totalDuration * 1000, // Convert to milliseconds
-      easing: 'linear',
+      easing: 'cubic-bezier(0.25, 0.46, 0.45, 0.94)', // easeOutQuad - gentler movement for Pi
       fill: 'forwards'
     });
 
