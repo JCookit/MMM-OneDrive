@@ -5,6 +5,18 @@
  * using feature clustering, sliding windows, and gradient analysis.
  * 
  * Production-ready implementation with adaptive sizing and confidence thresholds.
+ * 
+ * =================================================================================================
+ * FILE NAVIGATION:
+ * =================================================================================================
+ * 1. INITIALIZATION & CONFIG     - Lines 13-50   : Constructor and configuration options
+ * 2. MAIN DETECTION PIPELINE     - Lines 51-182  : Primary detection algorithm  
+ * 3. FEATURE CLUSTERING          - Lines 183-302 : Corner/feature detection and clustering
+ * 4. SLIDING WINDOW ANALYSIS     - Lines 237-302 : Grid-based interest scoring
+ * 5. GRADIENT ANALYSIS           - Lines 304-368 : Edge/contrast detection
+ * 6. UTILITY & SUPPORT METHODS   - Lines 369-617 : Clustering, overlap removal, confidence
+ * 7. UNIFIED PIPELINE METHOD     - Lines 618-670 : Mat-based method for unified processing
+ * =================================================================================================
  */
 
 const cv = require('@u4/opencv4nodejs');
@@ -41,6 +53,10 @@ class InterestDetector {
       ? (msg) => console.log(`[InterestDetection] ${msg}`)
       : () => {};
   }
+
+  // =================================================================================================
+  // 2. MAIN DETECTION PIPELINE - Core interest detection algorithm
+  // =================================================================================================
 
   /**
    * Main entry point - find most interesting regions in image
@@ -177,6 +193,10 @@ class InterestDetector {
     }
   }
   
+  // =================================================================================================
+  // 3. FEATURE CLUSTERING - Corner detection and feature point clustering
+  // =================================================================================================
+
   /**
    * Detect regions by clustering feature points
    */
@@ -231,6 +251,10 @@ class InterestDetector {
     }
   }
   
+  // =================================================================================================
+  // 4. SLIDING WINDOW ANALYSIS - Grid-based interest scoring with overlapping regions
+  // =================================================================================================
+
   /**
    * Sliding window analysis with overlapping regions
    */
@@ -298,6 +322,10 @@ class InterestDetector {
     }
   }
   
+  // =================================================================================================
+  // 5. GRADIENT ANALYSIS - Edge and contrast detection
+  // =================================================================================================
+
   /**
    * Detect regions based on brightness/darkness gradients
    */
@@ -363,6 +391,10 @@ class InterestDetector {
     }
   }
   
+  // =================================================================================================
+  // 6. UTILITY & SUPPORT METHODS - Clustering, overlap removal, confidence calculation
+  // =================================================================================================
+
   /**
    * Cluster features by distance (not grid-based)
    */
@@ -610,87 +642,9 @@ class InterestDetector {
     return Math.max(0.2, Math.min(1.0, confidence));
   }
 
-  /**
-   * Detect interest regions from image buffer
-   * Convenience method that handles buffer-to-image conversion
-   * @param {Buffer} imageBuffer - Image data as Buffer
-   * @returns {Promise<Object|null>} Interest detection result with candidates array
-   */
-  async detectInterestRegions(imageBuffer) {
-    const cv = require('@u4/opencv4nodejs');
-    let image = null;
-    try {
-      // Handle IPC buffer serialization
-      let buffer = imageBuffer;
-      if (!Buffer.isBuffer(imageBuffer) && imageBuffer?.type === 'Buffer' && Array.isArray(imageBuffer?.data)) {
-        buffer = Buffer.from(imageBuffer.data);
-        console.log(`[InterestDetector] Converted serialized buffer: ${buffer.length} bytes`);
-      }
-      
-      console.log(`[InterestDetector] Starting interest region detection from buffer (${buffer?.length || 'unknown'} bytes)`);
-      
-      if (!buffer || (!Buffer.isBuffer(buffer) && buffer.length === undefined)) {
-        throw new Error('Invalid or empty image buffer for interest detection');
-      }
-      
-      // Decode image buffer using OpenCV
-      image = cv.imdecode(buffer);
-      if (!image || image.empty) {
-        throw new Error('Failed to decode image buffer for interest detection');
-      }
-      
-      console.log(`[InterestDetector] Image decoded: ${image.cols}x${image.rows} pixels`);
-      
-      // Use the existing interest detection (now returns array)
-      const interestCandidates = await this.findInterestingRegion(image);
-      
-      if (interestCandidates && interestCandidates.length > 0) {
-        // Convert each candidate to the expected format
-        const candidates = interestCandidates.map(candidate => ({
-          x: candidate.x,
-          y: candidate.y,
-          width: candidate.width,
-          height: candidate.height,
-          confidence: candidate.confidence,
-          score: candidate.score,
-          type: candidate.type || 'interest',
-          method: candidate.method || 'interest_detection',
-          rank: candidate.rank || 1
-        }));
-        
-        console.log(`[InterestDetector] Found ${candidates.length} interest region candidates`);
-        candidates.forEach((candidate, i) => {
-          console.log(`[InterestDetector]   #${i + 1}: ${candidate.type} (confidence: ${candidate.confidence.toFixed(2)}, score: ${candidate.score.toFixed(1)})`);
-        });
-        
-        // Return in format expected by vision-worker
-        return { 
-          candidates: candidates,
-          // Keep legacy fields for backward compatibility
-          focalPoint: candidates[0], // First candidate as primary focal point
-          confidence: candidates[0].confidence
-        };
-      }
-      
-      console.log(`[InterestDetector] No interest regions found`);
-      return { 
-        candidates: [],
-        focalPoint: null,
-        confidence: 0
-      };
-      
-    } catch (error) {
-      console.error(`[InterestDetector] Interest region detection failed:`, error.message);
-      return { 
-        candidates: [],
-        focalPoint: null,
-        confidence: 0
-      };
-    } finally {
-      // CRITICAL: Release the decoded image
-      safeRelease(image, 'decoded image');
-    }
-  }
+  // =================================================================================================
+  // 7. UNIFIED PIPELINE METHOD - Mat-based method for unified processing pipeline
+  // =================================================================================================
 
   /**
    * Interest detection using pre-processed OpenCV Mat
@@ -727,28 +681,21 @@ class InterestDetector {
           console.log(`[InterestDetector]   #${i + 1}: ${candidate.type} (confidence: ${candidate.confidence.toFixed(2)}, score: ${candidate.score.toFixed(1)})`);
         });
         
-        // Return in format expected by vision-worker
+        // Return candidates array for vision-worker
         return { 
-          candidates: candidates,
-          // Keep legacy fields for backward compatibility
-          focalPoint: candidates[0], // First candidate as primary focal point
-          confidence: candidates[0].confidence
+          candidates: candidates
         };
       }
       
       console.log(`[InterestDetector] No interest regions found`);
       return { 
-        candidates: [],
-        focalPoint: null,
-        confidence: 0
+        candidates: []
       };
       
     } catch (error) {
       console.error(`[InterestDetector] Interest region detection from Mat failed:`, error.message);
       return { 
-        candidates: [],
-        focalPoint: null,
-        confidence: 0
+        candidates: []
       };
     }
     // Note: No image cleanup needed - Mat is managed by caller

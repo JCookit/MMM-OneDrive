@@ -3,6 +3,16 @@
  * 
  * Analyzes dominant colors in images using K-means clustering.
  * Provides main colors and contrasting colors for UI theming and animations.
+ * 
+ * =================================================================================================
+ * FILE NAVIGATION:
+ * =================================================================================================
+ * 1. INITIALIZATION & CONFIG     - Lines 13-51   : Constructor and configuration options
+ * 2. UNIFIED PIPELINE METHOD     - Lines 52-92   : Mat-based color analysis for unified processing
+ * 3. COLOR CALCULATION METHODS   - Lines 93-159  : HSV conversion, unified scoring
+ * 4. K-MEANS COLOR EXTRACTION    - Lines 160-338 : Core color clustering and analysis
+ * 5. COLOR UTILITY METHODS       - Lines 339-469 : Contrast, complementary, text-friendly colors
+ * =================================================================================================
  */
 
 const cv = require('@u4/opencv4nodejs');
@@ -44,63 +54,9 @@ class ColorAnalyzer {
       : () => {};
   }
 
-  /**
-   * Analyze dominant colors in an image buffer
-   * @param {Buffer} imageBuffer - Image data as Buffer
-   * @returns {Promise<Object>} Color analysis results
-   */
-  async analyzeColors(imageBuffer) {
-    const startTime = Date.now();
-    let image = null;
-    
-    try {
-      // Handle IPC buffer serialization
-      let buffer = imageBuffer;
-      if (!Buffer.isBuffer(imageBuffer) && imageBuffer?.type === 'Buffer' && Array.isArray(imageBuffer?.data)) {
-        buffer = Buffer.from(imageBuffer.data);
-        this.log(`Converted serialized buffer: ${buffer.length} bytes`);
-      }
-      
-      this.log(`Starting color analysis from buffer (${buffer?.length || 'unknown'} bytes)`);
-      
-      if (!buffer || (!Buffer.isBuffer(buffer) && buffer.length === undefined)) {
-        throw new Error('Invalid or empty image buffer for color analysis');
-      }
-      
-      // Decode image buffer using OpenCV
-      image = cv.imdecode(buffer);
-      if (!image || image.empty) {
-        throw new Error('Failed to decode image buffer for color analysis');
-      }
-      
-      this.log(`Image decoded: ${image.cols}x${image.rows} pixels`);
-      
-      // Analyze dominant colors
-      const colorResults = await this.findDominantColors(image);
-      
-      if (colorResults && colorResults.length > 0) {
-        const processingTime = Date.now() - startTime;
-        this.log(`Color analysis completed in ${processingTime}ms: ${colorResults.length} colors found`);
-        
-        return {
-          dominantColors: colorResults,
-          mainColor: colorResults[0], // Most dominant color
-          processingTime: processingTime,
-          timestamp: Date.now()
-        };
-      }
-      
-      this.log('No dominant colors found');
-      return null;
-      
-    } catch (error) {
-      console.error(`[ColorAnalysis] Color analysis failed:`, error.message);
-      return null;
-    } finally {
-      // CRITICAL: Release the decoded image
-      safeRelease(image, 'color analysis image');
-    }
-  }
+  // =================================================================================================
+  // 2. UNIFIED PIPELINE METHOD - Mat-based color analysis for unified processing
+  // =================================================================================================
 
   /**
    * Color analysis using pre-processed OpenCV Mat
@@ -141,6 +97,10 @@ class ColorAnalyzer {
     }
     // Note: No image cleanup needed - Mat is managed by caller
   }
+
+  // =================================================================================================
+  // 3. COLOR CALCULATION METHODS - HSV conversion, unified scoring algorithms
+  // =================================================================================================
 
   /**
    * Calculate unified importance score combining frequency and visual interest
@@ -209,6 +169,10 @@ class ColorAnalyzer {
     
     return { h, s, v };
   }
+
+  // =================================================================================================
+  // 4. K-MEANS COLOR EXTRACTION - Core color clustering and dominant color analysis
+  // =================================================================================================
 
   /**
    * Find dominant colors using K-means clustering + unified interest scoring
@@ -388,6 +352,10 @@ class ColorAnalyzer {
       }
     }
   }
+
+  // =================================================================================================
+  // 5. COLOR UTILITY METHODS - Contrast, complementary, and text-friendly color calculations
+  // =================================================================================================
 
   /**
    * Calculate contrasting color for better readability

@@ -18,9 +18,6 @@ const FACE_DETECTION_CONFIG = {
   
   // Face size filtering (percentage of image dimensions)
   MIN_FACE_SIZE_PERCENT: 0.05, // Ignore faces smaller than 5% of image width/height
-  
-  // Focal point expansion (percentage of face size)
-  FOCAL_AREA_EXPANSION: 0.5,
 };
 
 class FaceDetector {
@@ -111,7 +108,7 @@ class FaceDetector {
         centerY: Math.round(det.centerY)
       }));
       
-      // Return raw faces without size filtering (filtering happens in detectFacesOnly)
+      // Return raw faces without size filtering (filtering happens in detectFacesFromMat)
       return faces;
       
     } catch (error) {
@@ -261,72 +258,15 @@ class FaceDetector {
     return sizeFilteredFaces;
   }
 
+  // =================================================================================================
+  // MODERN UNIFIED PIPELINE METHOD - Uses preprocessed Mat from vision-worker
+  // =================================================================================================
 
   /**
-   * Load image from buffer using OpenCV with proper EXIF orientation handling
-   * @param {Buffer} imageBuffer - Image data as Buffer
-   * @returns {Promise<cv.Mat>} OpenCV Mat object
-   */
-  async loadImageFromBuffer(imageBuffer) {
-    let cvImage = null;
-    
-    try {
-      // Debug buffer information
-      console.debug(`[FaceDetector] Loading image from buffer: length=${imageBuffer?.length}, type=${typeof imageBuffer}, isBuffer=${Buffer.isBuffer(imageBuffer)}`);
-      
-      if (!imageBuffer) {
-        throw new Error('No image buffer provided');
-      }
-      
-      // Convert to Buffer if needed (IPC might serialize it differently)
-      let buffer = imageBuffer;
-      if (!Buffer.isBuffer(imageBuffer)) {
-        if (imageBuffer.type === 'Buffer' && Array.isArray(imageBuffer.data)) {
-          // Handle Node.js buffer serialization from IPC
-          buffer = Buffer.from(imageBuffer.data);
-          console.log(`[FaceDetector] Converted serialized buffer: ${buffer.length} bytes`);
-        } else {
-          throw new Error(`Invalid buffer type: ${typeof imageBuffer}, isArray: ${Array.isArray(imageBuffer)}`);
-        }
-      }
-      
-      // Use Sharp to handle EXIF orientation and get consistent results
-      const sharpImage = sharp(buffer);
-      
-      // Get metadata to check orientation
-      const metadata = await sharpImage.metadata();
-      console.log(`[FaceDetector] Image metadata: ${metadata.width}x${metadata.height}, format=${metadata.format}`);
-      
-      // Auto-rotate based on EXIF and convert to JPEG
-      const processedBuffer = await sharpImage
-        .rotate() // This automatically handles EXIF orientation
-        .jpeg({ quality: 95 }) // Higher quality for face detection
-        .toBuffer();
-      
-      // Load into OpenCV
-      cvImage = cv.imdecode(processedBuffer);
-      
-      if (!cvImage || cvImage.empty) {
-        throw new Error('Failed to decode image with OpenCV');
-      }
-      
-      console.log(`[FaceDetector] Image loaded successfully: ${cvImage.cols}x${cvImage.rows}`);
-      return cvImage;
-      
-    } catch (error) {
-      console.error(`[FaceDetector] Failed to load image from buffer:`, error.message);
-      console.error(`[FaceDetector] Image loading error stack:`, error.stack);
-      console.error(`[FaceDetector] Buffer info: length=${imageBuffer?.length}, type=${typeof imageBuffer}, isBuffer=${Buffer.isBuffer(imageBuffer)}`);
-
-      // Clean up on error
-      if (cvImage && !cvImage.empty) {
-        cvImage.release();
-      }
-      throw error;
-    } 
-  }
-
-  /**
+   * Detect faces from preprocessed OpenCV Mat (for unified pipeline)
+   * @param {cv.Mat} cvImage - Preprocessed OpenCV image with proper orientation  
+   * @returns {Promise<Array>} Array of face objects with coordinates and confidence
+   */  /**
    * Load image using OpenCV with proper EXIF orientation handling
    */
   async loadImage(imagePath) {
@@ -447,187 +387,6 @@ class FaceDetector {
     };
   }
 
-  /**
-   * Draw ALL face rectangles and focal point rectangle on image
-   */
-  // async drawAllDetections(image, faces, focalPoint) {
-  //   try {
-  //     // Clone the image for drawing
-  //     const markedImage = image.copy();
-
-  //     // Draw ALL individual face rectangles in bright green
-  //     faces.forEach((face, index) => {
-  //       markedImage.drawRectangle(
-  //         new cv.Point2(face.x, face.y),
-  //         new cv.Point2(face.x + face.width, face.y + face.height),
-  //         new cv.Vec3(0, 255, 0), // Bright Green for individual faces
-  //         3
-  //       );
-        
-  //       // Add face number label
-  //       markedImage.putText(
-  //         `Face ${index + 1}`,
-  //         new cv.Point2(face.x, face.y - 5),
-  //         cv.FONT_HERSHEY_SIMPLEX,
-  //         0.6,
-  //         new cv.Vec3(0, 255, 0),
-  //         2
-  //       );
-  //     });
-
-  //     // Draw focal point rectangle with color based on detection type
-  //     // Convert focal point from percentage to pixel coordinates  
-  //     const focalPixelX = Math.round(focalPoint.x * image.cols);
-  //     const focalPixelY = Math.round(focalPoint.y * image.rows);
-  //     const focalPixelWidth = Math.round(focalPoint.width * image.cols);
-  //     const focalPixelHeight = Math.round(focalPoint.height * image.rows);
-      
-  //     // Choose color based on focal point type
-  //     let focalColor, focalLabel;
-  //     if (focalPoint.type === 'interest_region') {
-  //       focalColor = new cv.Vec3(255, 165, 0); // Orange for interest regions
-  //       focalLabel = `Interest Area (${focalPoint.method})`;
-  //     } else if (focalPoint.type === 'single_face') {
-  //       focalColor = new cv.Vec3(0, 0, 255); // Red for single face
-  //       focalLabel = 'Face Focal Area';
-  //     } else if (focalPoint.type === 'multiple_faces') {
-  //       focalColor = new cv.Vec3(0, 0, 255); // Red for multiple faces
-  //       focalLabel = `Multi-Face Area (${faces.length})`;
-  //     } else {
-  //       focalColor = new cv.Vec3(128, 128, 128); // Gray for default/center fallback
-  //       focalLabel = 'Default Center';
-  //     }
-      
-  //     markedImage.drawRectangle(
-  //       new cv.Point2(focalPixelX, focalPixelY),
-  //       new cv.Point2(focalPixelX + focalPixelWidth, focalPixelY + focalPixelHeight),
-  //       focalColor,
-  //       4 // Thicker line for focal point
-  //     );
-      
-  //     // Add focal point label
-  //     markedImage.putText(
-  //       focalLabel,
-  //       new cv.Point2(focalPixelX, focalPixelY - 10),
-  //       cv.FONT_HERSHEY_SIMPLEX,
-  //       0.7,
-  //       focalColor,
-  //       2
-  //     );
-
-  //     // Convert back to buffer
-  //     return cv.imencode('.jpg', markedImage);
-  //   } catch (error) {
-  //     console.error('[FaceDetector] Error creating marked image with all detections:', error);
-  //     throw error;
-  //   }
-  // }
-
-  /**
-   * Draw only the focal point rectangle on image
-   */
-  // async drawFocalPointOnly(image, focalPoint) {
-  //   try {
-  //     // Clone the image for drawing
-  //     const markedImage = image.copy();
-
-  //     // Convert focal point from percentage to pixel coordinates
-  //     const focalPixelX = Math.round(focalPoint.x * image.cols);
-  //     const focalPixelY = Math.round(focalPoint.y * image.rows);
-  //     const focalPixelWidth = Math.round(focalPoint.width * image.cols);
-  //     const focalPixelHeight = Math.round(focalPoint.height * image.rows);
-
-  //     // Draw focal point rectangle in bright red
-  //     markedImage.drawRectangle(
-  //       new cv.Point2(focalPixelX, focalPixelY),
-  //       new cv.Point2(focalPixelX + focalPixelWidth, focalPixelY + focalPixelHeight),
-  //       new cv.Vec3(0, 0, 255), // Bright Red
-  //       4 // Thicker line for visibility
-  //     );
-
-  //     // Convert back to buffer
-  //     return cv.imencode('.jpg', markedImage);
-  //   } catch (error) {
-  //     console.error('[FaceDetector] Error creating marked image:', error);
-  //     throw error;
-  //   }
-  // }
-
-  /**
-   * Draw debug information on image
-   */
-  // async drawDebugInfo(image, faces, focalPoint) {
-  //   try {
-  //     // Clone the image for drawing
-  //     const debugImage = image.copy();
-
-  //     // Draw face rectangles in green
-  //     faces.forEach(face => {
-  //       debugImage.drawRectangle(
-  //         new cv.Point2(face.x, face.y),
-  //         new cv.Point2(face.x + face.width, face.y + face.height),
-  //         new cv.Vec3(0, 255, 0), // Green
-  //         2
-  //       );
-  //     });
-
-  //     // Draw focal point rectangle in red
-  //     debugImage.drawRectangle(
-  //       new cv.Point2(focalPoint.x, focalPoint.y),
-  //       new cv.Point2(focalPoint.x + focalPoint.width, focalPoint.y + focalPoint.height),
-  //       new cv.Vec3(0, 0, 255), // Red
-  //       3
-  //     );
-
-  //     // Convert back to buffer
-  //     return cv.imencode('.jpg', debugImage);
-  //   } catch (error) {
-  //     console.error('[FaceDetector] Error creating debug image:', error);
-  //     throw error;
-  //   }
-  // }
-
-  /**
-   * Pure face detection - only returns array of face objects
-   * @param {Buffer} imageBuffer - Image data as Buffer
-   * @returns {Promise<Array>} Array of face objects: [{ x, y, width, height, confidence }]
-   */
-  async detectFacesOnly(imageBuffer) {
-    let image = null;
-    logMatMemory("BEFORE face detection");
-    
-    try {
-      // Load image from buffer
-      image = await this.loadImageFromBuffer(imageBuffer);
-      trackMat(image, 'decoded image');
-      
-      // Detect faces using YOLO
-      let faces = [];
-      try {
-        console.log(`[FaceDetector] Using YOLO detection`);
-        faces = await this.detectFacesYOLO(image);
-      } catch (error) {
-        console.error('[FaceDetector] YOLO detection failed:', error.message);
-        throw error; // Don't fall back, let the error propagate
-      }
-      
-      // Filter faces by size
-      const sizeFilteredFaces = this.filterFacesBySize(faces, image.cols, image.rows);
-      logMatMemory("AFTER face detection");
-      console.log(`[FaceDetector] ✅ Face detection complete: ${sizeFilteredFaces.length} faces found`);
-      
-      return sizeFilteredFaces;
-      
-    } catch (error) {
-      console.error(`[FaceDetector] ❌ Pure face detection failed:`, error.message);
-      console.error(`[FaceDetector] Error stack:`, error.stack);
-      return []; // Return empty array on failure
-    } finally {
-      // CRITICAL: Release all Mat objects
-      safeRelease(image, 'decoded image');
-      logMatMemory("AFTER face detection cleanup");
-    }
-  }
 
   /**
    * Detect faces from preprocessed OpenCV Mat (for unified pipeline)

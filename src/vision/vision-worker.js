@@ -7,11 +7,22 @@
  * Complete processing pipeline:
  * 1. Face Detection (YOLO)  
  * 2. Interest Region Detection (fallback)
- * 3. Center Focal Point (final fallback)
+ * 3. Color Analysis (theming)
  * 
  * Communication via IPC messages:
  * - Input: { type: 'PROCESS_IMAGE', imageBuffer: Buffer, filename: string, config: Object }
- * - Output: { type: 'PROCESSING_RESULT', result: { focalPoint, method, faces } }
+ * - Output: { type: 'PROCESSING_RESULT', result: { faces, interestRegions, colorAnalysis } }
+ * 
+ * =================================================================================================
+ * FILE NAVIGATION:
+ * =================================================================================================
+ * 1. INITIALIZATION & SETUP      - Lines 30-165  : Constructor, initialization, IPC setup
+ * 2. IMAGE PREPROCESSING         - Lines 166-226 : Shared buffer/EXIF/Mat processing  
+ * 3. IPC MESSAGE HANDLING        - Lines 227-328 : Message routing and error handling
+ * 4. UNIFIED VISION PIPELINE     - Lines 330-468 : Main processing pipeline
+ * 5. DEBUG IMAGE CREATION        - Lines 470-688 : Debug visualization with overlays
+ * 6. UTILITY & LIFECYCLE METHODS - Lines 690-797 : Config, health checks, shutdown
+ * =================================================================================================
  */
 
 const path = require('path');
@@ -25,6 +36,10 @@ const { FaceDetector } = require('./faceDetection');
 const InterestDetector = require('./interestDetection');
 const ColorAnalyzer = require('./colorAnalysis');
 const { trackMat, safeRelease, logMatMemory, getMatStats } = require('./matManager');
+
+// =================================================================================================
+// 1. INITIALIZATION & SETUP
+// =================================================================================================
 
 class VisionWorker {
   constructor() {
@@ -156,6 +171,10 @@ class VisionWorker {
     });
   }
 
+  // =================================================================================================
+  // 2. IMAGE PREPROCESSING - Shared buffer handling, EXIF rotation, OpenCV Mat creation
+  // =================================================================================================
+
   /**
    * Shared preprocessing function - handles buffer conversion, EXIF rotation, and OpenCV Mat creation
    * This eliminates redundant processing across face detection, interest detection, and color analysis
@@ -223,6 +242,10 @@ class VisionWorker {
       throw error;
     }
   }
+
+  // =================================================================================================
+  // 3. IPC MESSAGE HANDLING - Message routing, error handling, and communication
+  // =================================================================================================
 
   async handleMessage(message) {
     const { type, requestId } = message;
@@ -323,9 +346,13 @@ class VisionWorker {
     }
   }
 
+  // =================================================================================================
+  // 4. UNIFIED VISION PIPELINE - Main processing with shared preprocessing
+  // =================================================================================================
+
   /**
-   * Unified Vision Processing Pipeline with Shared Preprocessing
-   * Runs face detection, interest detection, and color analysis with single image preprocessing
+   * Unified Vision Processing Pipeline - Core processing method
+   * Performs face detection, interest detection, and color analysis with shared preprocessing
    */
   async performUnifiedVisionProcessing(imageBuffer, filename) {
     console.debug(`[VisionWorker] 🔄 Starting unified vision pipeline for ${filename || 'unknown'}`);
@@ -386,13 +413,6 @@ class VisionWorker {
               .slice(0, MAX_INTEREST_CANDIDATES);
             
             console.debug(`[VisionWorker] Interest detection found ${interestRegions.length} candidates above ${INTEREST_CONFIDENCE_THRESHOLD} threshold`);
-          } else if (interestResult && interestResult.focalPoint) {
-            // Handle legacy single result format
-            interestRegions = [{
-              ...interestResult.focalPoint,
-              confidence: interestResult.confidence || 0.7 // Default confidence for legacy results
-            }];
-            console.debug(`[VisionWorker] Interest detection found 1 legacy result`);
           }
           
           // Check for Mat leaks in interest detection
@@ -463,6 +483,10 @@ class VisionWorker {
       }
     }
   }
+
+  // =================================================================================================
+  // 5. DEBUG IMAGE CREATION - Visual debugging with face boxes and interest region overlays  
+  // =================================================================================================
 
   /**
    * Create debug image with face boxes, interest region overlays, and color swatches from Mat
@@ -686,6 +710,10 @@ class VisionWorker {
       throw error;
     }
   }
+
+  // =================================================================================================
+  // 6. UTILITY & LIFECYCLE METHODS - Configuration, health checks, stats, and shutdown
+  // =================================================================================================
 
   handleConfigUpdate(message) {
     const { requestId, config } = message;

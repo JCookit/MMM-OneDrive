@@ -3,6 +3,16 @@
  * 
  * Provides centralized tracking and cleanup of OpenCV Mat objects
  * to prevent memory leaks and native heap corruption.
+ * 
+ * =================================================================================================
+ * FILE NAVIGATION:
+ * =================================================================================================
+ * - trackMat()        - Register a new Mat object for tracking
+ * - safeRelease()     - Safely release a Mat with error handling  
+ * - getMatStats()     - Get current memory statistics
+ * - forceCleanup()    - Emergency cleanup (use only in error cases)
+ * - logMatMemory()    - Debug logging of current memory usage
+ * =================================================================================================
  */
 
 // Global Mat object tracking
