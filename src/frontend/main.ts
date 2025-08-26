@@ -403,10 +403,23 @@ createStaticBackdropKeyframes: function(): void {
     const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
     current.textContent = "";
     
-    // ==================== IMG ELEMENT RENDERING ==================== 
-    // Using <img> elements with transforms for better Pi5 compatibility
-    back.style.backgroundImage = `url(${url})`; // Keep backdrop as background for blur effect
-    current.innerHTML = `<img src="${url}" style="width: 100%; height: 100%; object-fit: contain; display: block;">`;
+    // ==================== IMAGE RENDERING METHOD SWITCH ==================== 
+    // Toggle: true = <img> elements with transforms
+    //         false = <div> with background-image (potentially smoother on Pi)
+    const USE_IMG_ELEMENTS = false; // Set to true to test IMG approach
+    
+    if (USE_IMG_ELEMENTS) {
+      // New approach: Use <img> elements instead of background-image
+      back.style.backgroundImage = `url(${url})`; // Keep backdrop as background for blur effect
+      current.innerHTML = `<img src="${url}" style="width: 100%; height: 100%; object-fit: contain; display: block;">`;
+    } else {
+      // Original approach: background-image on divs
+      back.style.backgroundImage = `url(${url})`;
+      current.style.backgroundImage = `url(${url})`;
+      current.style.backgroundSize = 'contain';
+      current.style.backgroundPosition = 'center center';
+      current.style.backgroundRepeat = 'no-repeat';
+    }
 
     // Clear any existing animation
     back.style.animation = 'none';
@@ -523,15 +536,16 @@ createStaticBackdropKeyframes: function(): void {
     this.applyWebAnimationsKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
   },
 
-  // Web Animations API implementation with IMG elements
+  // Web Animations API implementation - supports both IMG and DIV approaches
   applyWebAnimationsKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any): void {
     // Get image dimensions for scale calculation
     const imageWidth = Number(target.mediaMetadata?.width) || 0;
     const imageHeight = Number(target.mediaMetadata?.height) || 0;
     
-    // Using IMG elements - get the img element to animate
+    // Check if we're using IMG elements or background-image approach
     const imgElement = current.querySelector('img') as HTMLImageElement;
-    const elementToAnimate = imgElement;
+    const isUsingImgElement = imgElement !== null;
+    const elementToAnimate = isUsingImgElement ? imgElement : current;
     
     // Calculate optimal starting scale based on focal point rectangle
     let startScale = 1.5; // Default fallback
@@ -563,18 +577,20 @@ createStaticBackdropKeyframes: function(): void {
     let startTranslateY = 0;
     
     if (focalPoint && this.config.kenBurnsCenterStart !== false) {
-      // For IMG elements with object-fit: cover, we need different calculations
-      // The focal point coordinates are percentages of the ORIGINAL image
-      // But we need to translate in terms of the DISPLAYED image
-      
       elementToAnimate.style.transformOrigin = 'center center';
       
-      // Simple approach: translate to move focal point to center
-      // For IMG elements, percentages in transform are relative to the element's size
-      startTranslateX = 50 - cropX; // Move image so focal point X aligns with center (50%)
-      startTranslateY = 50 - cropY; // Move image so focal point Y aligns with center (50%)
+      if (isUsingImgElement) {
+        // For IMG elements with object-fit: contain
+        startTranslateX = 50 - cropX; // Simple translation for IMG elements
+        startTranslateY = 50 - cropY;
+      } else {
+        // For DIV with background-image: contain
+        startTranslateX = 50 - cropX; // Same calculation for background-image
+        startTranslateY = 50 - cropY;
+      }
       
       console.debug("[MMM-OneDrive] Pan calculation:", {
+        method: isUsingImgElement ? "IMG element" : "background-image",
         focalCenter: `${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`,
         translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`
       });
@@ -587,11 +603,20 @@ createStaticBackdropKeyframes: function(): void {
     }
     
     // Reset element to clean state
-    // Reset img element
-    elementToAnimate.style.animation = 'none';
-    elementToAnimate.style.opacity = '1';
-    elementToAnimate.style.transform = '';
-    current.style.overflow = 'hidden'; // Keep overflow on container
+    if (isUsingImgElement) {
+      // Reset img element
+      elementToAnimate.style.animation = 'none';
+      elementToAnimate.style.opacity = '1';
+      elementToAnimate.style.transform = '';
+      current.style.overflow = 'hidden'; // Keep overflow on container
+    } else {
+      // Reset div with background-image
+      current.style.animation = 'none';
+      current.classList.remove('animated');
+      current.style.opacity = '1';
+      current.style.transform = '';
+      current.style.overflow = 'hidden';
+    }
 
     // startScale = 1.0;  // temporary!
     // startTranslateX = 0;
@@ -655,6 +680,7 @@ createStaticBackdropKeyframes: function(): void {
     });
 
     console.debug("[MMM-OneDrive] Ken Burns animation started:", { 
+      method: isUsingImgElement ? "IMG element" : "background-image",
       totalDuration: `${totalDuration}s`,
       filename: target.filename,
       hasFocalPoint: !!focalPoint
