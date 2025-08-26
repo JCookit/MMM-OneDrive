@@ -403,20 +403,10 @@ createStaticBackdropKeyframes: function(): void {
     const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
     current.textContent = "";
     
-    // ==================== IMAGE RENDERING METHOD SWITCH ==================== 
-    // Toggle: true = <img> elements with transforms (Pi5-friendly)
-    //         false = <div> with background-image (original approach)
-    const USE_IMG_ELEMENTS = false; // Set to true to test new approach
-    
-    if (USE_IMG_ELEMENTS) {
-      // New approach: Use <img> elements instead of background-image
-      back.style.backgroundImage = `url(${url})`; // Keep backdrop as background for blur effect
-      current.innerHTML = `<img src="${url}" style="width: 100%; height: 100%; object-fit: cover; display: block;">`;
-    } else {
-      // Original approach: background-image on divs
-      back.style.backgroundImage = `url(${url})`;
-      current.style.backgroundImage = `url(${url})`;
-    }
+    // ==================== IMG ELEMENT RENDERING ==================== 
+    // Using <img> elements with transforms for better Pi5 compatibility
+    back.style.backgroundImage = `url(${url})`; // Keep backdrop as background for blur effect
+    current.innerHTML = `<img src="${url}" style="width: 100%; height: 100%; object-fit: contain; display: block;">`;
 
     // Clear any existing animation
     back.style.animation = 'none';
@@ -529,28 +519,19 @@ createStaticBackdropKeyframes: function(): void {
   applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, focalPoint?: any): void {
     const totalDuration = (this.config.updateInterval/1000); 
     
-    // ==================== ANIMATION METHOD SWITCH ==================== 
-    // Toggle: true = Web Animations API (more explicit memory control)
-//         false = CSS animations (original approach)
-const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
-    
-    if (USE_WEB_ANIMATIONS_API) {
-      this.applyWebAnimationsKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
-    } else {
-      this.applyCSSAnimationKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
-    }
+    // Using Web Animations API with IMG elements
+    this.applyWebAnimationsKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
   },
 
-  // NEW: Web Animations API implementation
+  // Web Animations API implementation with IMG elements
   applyWebAnimationsKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any): void {
     // Get image dimensions for scale calculation
     const imageWidth = Number(target.mediaMetadata?.width) || 0;
     const imageHeight = Number(target.mediaMetadata?.height) || 0;
     
-    // Check if we're using IMG elements or background-image approach
+    // Using IMG elements - get the img element to animate
     const imgElement = current.querySelector('img') as HTMLImageElement;
-    const isUsingImgElement = imgElement !== null;
-    const elementToAnimate = isUsingImgElement ? imgElement : current;
+    const elementToAnimate = imgElement;
     
     // Calculate optimal starting scale based on focal point rectangle
     let startScale = 1.5; // Default fallback
@@ -570,10 +551,9 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       // Clamp the scale to reasonable bounds (1.1x to 2.5x to prevent memory issues)
       startScale = Math.max(1.1, Math.min(2.5, optimalScale));
       
-      console.debug("[MMM-OneDrive] Web Animations - Focal point scale calculation:", {
+      console.debug("[MMM-OneDrive] Focal point scale calculation:", {
         focalWidthPercent: focalWidthPercent.toFixed(1),
         focalHeightPercent: focalHeightPercent.toFixed(1),
-        optimalScale: optimalScale.toFixed(2),
         finalStartScale: startScale.toFixed(2)
       });
     }
@@ -583,21 +563,18 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
     let startTranslateY = 0;
     
     if (focalPoint && this.config.kenBurnsCenterStart !== false) {
-      // For IMG elements, we need to adjust translation calculations
-      // because transform-origin is different than background-position
-      if (isUsingImgElement) {
-        // For <img> elements, calculate translation to move focal point to center
-        // This is more straightforward than background-image positioning
-        startTranslateX = 50 - cropX; 
-        startTranslateY = 50 - cropY;
-      } else {
-        // Original background-image calculation
-        startTranslateX = 50 - cropX; 
-        startTranslateY = 50 - cropY;
-      }
+      // For IMG elements with object-fit: cover, we need different calculations
+      // The focal point coordinates are percentages of the ORIGINAL image
+      // But we need to translate in terms of the DISPLAYED image
       
-      console.debug("[MMM-OneDrive] Web Animations - Pan calculation:", {
-        method: isUsingImgElement ? "IMG element" : "background-image",
+      elementToAnimate.style.transformOrigin = 'center center';
+      
+      // Simple approach: translate to move focal point to center
+      // For IMG elements, percentages in transform are relative to the element's size
+      startTranslateX = 50 - cropX; // Move image so focal point X aligns with center (50%)
+      startTranslateY = 50 - cropY; // Move image so focal point Y aligns with center (50%)
+      
+      console.debug("[MMM-OneDrive] Pan calculation:", {
         focalCenter: `${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`,
         translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`
       });
@@ -610,20 +587,15 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
     }
     
     // Reset element to clean state
-    if (isUsingImgElement) {
-      // Reset img element
-      elementToAnimate.style.animation = 'none';
-      elementToAnimate.style.opacity = '1';
-      elementToAnimate.style.transform = '';
-      current.style.overflow = 'hidden'; // Keep overflow on container
-    } else {
-      // Reset div with background-image (original behavior)
-      current.style.animation = 'none';
-      current.classList.remove('animated');
-      current.style.opacity = '1';
-      current.style.transform = '';
-      current.style.overflow = 'hidden';
-    }
+    // Reset img element
+    elementToAnimate.style.animation = 'none';
+    elementToAnimate.style.opacity = '1';
+    elementToAnimate.style.transform = '';
+    current.style.overflow = 'hidden'; // Keep overflow on container
+
+    // startScale = 1.0;  // temporary!
+    // startTranslateX = 0;
+    // startTranslateY = 0;
 
     // Define keyframes for Web Animations API
     const keyframes = [
@@ -671,7 +643,7 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       if (current.kenBurnsAnimation === animation) {
         delete current.kenBurnsAnimation;
       }
-      console.debug("[MMM-OneDrive] Web Animation completed and cleaned up");
+      console.debug("[MMM-OneDrive] Web Animation completed");
     });
 
     // Clean up if animation is cancelled
@@ -679,122 +651,13 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       if (current.kenBurnsAnimation === animation) {
         delete current.kenBurnsAnimation;
       }
-      console.debug("[MMM-OneDrive] Web Animation cancelled and cleaned up");
+      console.debug("[MMM-OneDrive] Web Animation cancelled");
     });
 
-    console.debug("[MMM-OneDrive] Ken Burns Web Animation started:", { 
-      method: isUsingImgElement ? "IMG element transforms" : "DIV background-image transforms",
+    console.debug("[MMM-OneDrive] Ken Burns animation started:", { 
       totalDuration: `${totalDuration}s`,
       filename: target.filename,
-      hasFocalPoint: !!focalPoint,
-      startScale: startScale.toFixed(2),
-      translation: `${startTranslateX}%, ${startTranslateY}%`,
-      keyframes: keyframes.length
-    });
-  },
-
-  // ORIGINAL: CSS Animation implementation (kept as fallback)
-  // Original CSS implementation  
-  applyCSSAnimationKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any): void {
-    // Ensure static keyframes exist
-    this.createStaticKenBurnsKeyframes();
-    
-    // Check if we're using IMG elements or background-image approach
-    const imgElement = current.querySelector('img') as HTMLImageElement;
-    const isUsingImgElement = imgElement !== null;
-    const elementToAnimate = isUsingImgElement ? imgElement : current;
-    
-    // Get image dimensions for scale calculation
-    const imageWidth = Number(target.mediaMetadata?.width) || 0;
-    const imageHeight = Number(target.mediaMetadata?.height) || 0;
-    
-    // Calculate optimal starting scale based on focal point rectangle
-    let startScale = 1.5; // Default fallback
-    
-    if (focalPoint && imageWidth && imageHeight) {
-      // Calculate focal point dimensions as percentages of image
-      const focalWidthPercent = (focalPoint.width / imageWidth) * 100;
-      const focalHeightPercent = (focalPoint.height / imageHeight) * 100;
-      
-      // Calculate required scale to make focal point fit the screen
-      const scaleForWidth = 100 / focalWidthPercent;
-      const scaleForHeight = 100 / focalHeightPercent;
-      
-      // Use the smaller scale to ensure both dimensions fit
-      const optimalScale = Math.min(scaleForWidth, scaleForHeight);
-      
-      // Clamp the scale to reasonable bounds (1.1x to 2.5x to prevent memory issues)
-      startScale = Math.max(1.1, Math.min(2.5, optimalScale));
-      
-      console.debug("[MMM-OneDrive] CSS Animation - Focal point scale calculation:", {
-        focalWidthPercent: focalWidthPercent.toFixed(1),
-        focalHeightPercent: focalHeightPercent.toFixed(1),
-        optimalScale: optimalScale.toFixed(2),
-        finalStartScale: startScale.toFixed(2)
-      });
-    }
-
-    // Calculate pan offsets to center the focal point at start
-    let startTranslateX = 0;
-    let startTranslateY = 0;
-    
-    if (focalPoint && this.config.kenBurnsCenterStart !== false) {
-      // Calculate translation needed to move focal point to screen center (50%, 50%)
-      startTranslateX = 50 - cropX; 
-      startTranslateY = 50 - cropY;
-      
-      console.debug("[MMM-OneDrive] CSS Animation - Pan calculation:", {
-        method: isUsingImgElement ? "IMG element" : "background-image",
-        focalCenter: `${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`,
-        translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`
-      });
-    }
-    
-    // Remove any existing animation and clear the animated class to prevent conflicts
-    elementToAnimate.style.removeProperty('animation');
-    if (!isUsingImgElement) {
-      current.classList.remove('animated');
-    }
-    
-    // CRITICAL: Reset any lingering animated state (opacity, transform) from previous photo
-    elementToAnimate.style.opacity = '1';
-    elementToAnimate.style.transform = '';
-    
-    // Clean up any previous Ken Burns CSS variables from previous photo
-    elementToAnimate.style.removeProperty('--start-scale');
-    elementToAnimate.style.removeProperty('--start-x'); 
-    elementToAnimate.style.removeProperty('--start-y');
-    
-    // Apply CSS variables for the starting transform values
-    elementToAnimate.style.setProperty('--start-scale', startScale.toString());
-    elementToAnimate.style.setProperty('--start-x', `${startTranslateX}%`);
-    elementToAnimate.style.setProperty('--start-y', `${startTranslateY}%`);
-    
-    // CRITICAL: Force animation restart by temporarily clearing and reapplying
-    elementToAnimate.style.animation = 'none';
-    elementToAnimate.offsetHeight; // Force reflow to ensure 'none' is applied
-    
-    // Now apply the animation - browser will see this as a new animation
-    elementToAnimate.style.animation = `ken-burns-static ${totalDuration}s linear forwards`;
-    current.style.overflow = 'hidden'; // Always apply overflow to container
-    
-    // Clean up CSS variables when animation ends, but keep animation visible
-    elementToAnimate.addEventListener('animationend', function cleanup() {
-      elementToAnimate.removeEventListener('animationend', cleanup);
-      // Only clean up the variables, not the animation or overflow (to prevent flash)
-      elementToAnimate.style.removeProperty('--start-scale');
-      elementToAnimate.style.removeProperty('--start-x'); 
-      elementToAnimate.style.removeProperty('--start-y');
-    });
-    
-    console.debug("[MMM-OneDrive] Ken Burns animation (CSS):", { 
-      method: isUsingImgElement ? "IMG element CSS" : "DIV background-image CSS",
-      animation: "ken-burns-static",
-      totalDuration: `${totalDuration}s`,
-      filename: target.filename,
-      hasFocalPoint: !!focalPoint,
-      startScale: startScale.toFixed(2),
-      translation: `${startTranslateX}%, ${startTranslateY}%`
+      hasFocalPoint: !!focalPoint
     });
   },
 
