@@ -331,38 +331,7 @@ Module.register<Config>("MMM-OneDrive", {
   },
 
   // ==================== KEN BURNS DYNAMIC ANIMATION ==================== 
-  createStaticKenBurnsKeyframes: function(): void {
-    // Only create once
-    if (document.getElementById('ken-burns-static')) return;
-    
-    const staticKeyframes = `
-      @keyframes ken-burns-static {
-        0% {
-          opacity: 0;
-          transform: scale(var(--start-scale, 1.5)) translate(var(--start-x, 0%), var(--start-y, 0%));
-          overflow: hidden;
-        }
-        10% {
-          opacity: 1;
-          overflow: hidden;
-        }
-        90% {
-          opacity: 1;
-          overflow: hidden;
-        }
-        100% {
-          opacity: 0;
-          transform: translate(0%, 0%) scale(1.0);
-          overflow: hidden;
-        }
-      }
-    `;
-    
-    const styleElement = document.createElement('style');
-    styleElement.id = 'ken-burns-static';
-    styleElement.textContent = staticKeyframes;
-    document.head.appendChild(styleElement);
-  },
+  // Ken Burns effect now uses Web Animations API for hardware acceleration
 
   // ==================== BACKDROP STATIC ANIMATION ====================
 createStaticBackdropKeyframes: function(): void {
@@ -406,7 +375,7 @@ createStaticBackdropKeyframes: function(): void {
     // ==================== IMAGE RENDERING METHOD SWITCH ==================== 
     // Toggle: true = <img> elements with transforms
     //         false = <div> with background-image (potentially smoother on Pi)
-    const USE_IMG_ELEMENTS = false; // Set to true to test IMG approach
+    const USE_IMG_ELEMENTS = true; // Set to true to test IMG approach
     
     if (USE_IMG_ELEMENTS) {
       // New approach: Use <img> elements instead of background-image
@@ -609,6 +578,11 @@ createStaticBackdropKeyframes: function(): void {
       elementToAnimate.style.opacity = '1';
       elementToAnimate.style.transform = '';
       current.style.overflow = 'hidden'; // Keep overflow on container
+      
+      // Apply hardware acceleration to IMG element
+      elementToAnimate.style.willChange = 'transform, opacity';
+      elementToAnimate.style.backfaceVisibility = 'hidden';
+      elementToAnimate.style.transformStyle = 'preserve-3d';
     } else {
       // Reset div with background-image
       current.style.animation = 'none';
@@ -616,18 +590,23 @@ createStaticBackdropKeyframes: function(): void {
       current.style.opacity = '1';
       current.style.transform = '';
       current.style.overflow = 'hidden';
+      
+      // Apply hardware acceleration to DIV element
+      current.style.willChange = 'transform, opacity';
+      current.style.backfaceVisibility = 'hidden';
+      current.style.transformStyle = 'preserve-3d';
     }
 
     // startScale = 1.0;  // temporary!
     // startTranslateX = 0;
     // startTranslateY = 0;
 
-    // Define keyframes for Web Animations API
+    // Define keyframes for Web Animations API using 3D transforms
     const keyframes = [
       {
         // 0% - Start: fade in, scaled and translated to focal point
         opacity: 0,
-        transform: `scale(${startScale}) translate(${startTranslateX}%, ${startTranslateY}%)`
+        transform: `scale3d(${startScale}, ${startScale}, 1) translate3d(${startTranslateX}%, ${startTranslateY}%, 0)`
       },
       {
         // 10% - Fade in complete, still at focal point
@@ -642,13 +621,13 @@ createStaticBackdropKeyframes: function(): void {
       {
         // 100% - Fade out complete
         opacity: 0,
-        transform: `scale(1.0) translate(0%, 0%)`,
+        transform: `scale3d(1.0, 1.0, 1) translate3d(0%, 0%, 0)`,
         offset: 0.98 // cut it a little short to allow for pi slowness
       },
       {
         // 100% - Fade out complete
         opacity: 0,
-        transform: `scale(1.0) translate(0%, 0%)`,
+        transform: `scale3d(1.0, 1.0, 1) translate3d(0%, 0%, 0)`,
       }
 
     ];
