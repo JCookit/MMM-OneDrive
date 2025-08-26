@@ -629,6 +629,45 @@ class FaceDetector {
     }
   }
 
+  /**
+   * Detect faces from preprocessed OpenCV Mat (for unified pipeline)
+   * @param {cv.Mat} cvImage - Preprocessed OpenCV image with proper orientation
+   * @returns {Promise<Array>} Array of face objects with coordinates and confidence
+   */
+  async detectFacesFromMat(cvImage) {
+    if (!cvImage || cvImage.empty) {
+      throw new Error('Invalid OpenCV Mat provided for face detection');
+    }
+    
+    console.debug(`[FaceDetector] Detecting faces from preprocessed Mat: ${cvImage.cols}x${cvImage.rows}`);
+    logMatMemory("BEFORE Mat-based face detection");
+    
+    try {
+      // Detect faces using YOLO - image already preprocessed
+      let faces = [];
+      try {
+        console.log(`[FaceDetector] Using YOLO detection on preprocessed Mat`);
+        faces = await this.detectFacesYOLO(cvImage, false); // false = don't release the passed Mat
+      } catch (error) {
+        console.error('[FaceDetector] YOLO Mat detection failed:', error.message);
+        throw error;
+      }
+      
+      // Filter faces by size
+      const sizeFilteredFaces = this.filterFacesBySize(faces, cvImage.cols, cvImage.rows);
+      logMatMemory("AFTER Mat-based face detection");
+      console.debug(`[FaceDetector] Mat-based face detection: ${faces.length} raw -> ${sizeFilteredFaces.length} filtered faces`);
+      
+      return sizeFilteredFaces;
+      
+    } catch (error) {
+      console.error('[FaceDetector] Mat-based face detection failed:', error.message);
+      console.error('[FaceDetector] Mat-based face detection stack:', error.stack);
+      throw error;
+    }
+    // NOTE: Do not release cvImage here - it's managed by the caller (vision-worker)
+  }
+
 
 }
 

@@ -103,6 +103,46 @@ class ColorAnalyzer {
   }
 
   /**
+   * Color analysis using pre-processed OpenCV Mat
+   * @param {Mat} image - Pre-processed OpenCV Mat
+   * @returns {Promise<Object>} Color analysis results
+   */
+  async analyzeColorsFromMat(image) {
+    const startTime = Date.now();
+    
+    try {
+      if (!image || image.empty) {
+        throw new Error('Invalid or empty image Mat for color analysis');
+      }
+      
+      this.log(`Starting color analysis from Mat (${image.cols}x${image.rows} pixels)`);
+      
+      // Analyze dominant colors
+      const colorResults = await this.findDominantColors(image);
+      
+      if (colorResults && colorResults.length > 0) {
+        const processingTime = Date.now() - startTime;
+        this.log(`Color analysis completed in ${processingTime}ms: ${colorResults.length} colors found`);
+        
+        return {
+          dominantColors: colorResults,
+          mainColor: colorResults[0], // Most dominant color
+          processingTime: processingTime,
+          timestamp: Date.now()
+        };
+      }
+      
+      this.log('No dominant colors found');
+      return null;
+      
+    } catch (error) {
+      console.error(`[ColorAnalysis] Color analysis from Mat failed:`, error.message);
+      return null;
+    }
+    // Note: No image cleanup needed - Mat is managed by caller
+  }
+
+  /**
    * Calculate unified importance score combining frequency and visual interest
    * @param {number} frequency - Color frequency (0-1)
    * @param {object} hsv - HSV color object {h, s, v}

@@ -18,6 +18,7 @@ const path = require('path');
 
 // Import OpenCV and utilities
 const cv = require('@u4/opencv4nodejs');
+const sharp = require('sharp');
 
 // Import vision processing modules  
 const { FaceDetector } = require('./faceDetection');
@@ -155,6 +156,74 @@ class VisionWorker {
     });
   }
 
+  /**
+   * Shared preprocessing function - handles buffer conversion, EXIF rotation, and OpenCV Mat creation
+   * This eliminates redundant processing across face detection, interest detection, and color analysis
+   * @param {Buffer} imageBuffer - Raw image buffer from IPC (may be serialized)
+   * @param {string} filename - Filename for logging
+   * @returns {Promise<cv.Mat>} Preprocessed OpenCV Mat with proper orientation
+   */
+  async preprocessImageBuffer(imageBuffer, filename = 'unknown') {
+    let cvImage = null;
+    
+    try {
+      console.debug(`[VisionWorker] 🔄 Preprocessing image buffer for ${filename}`);
+      
+      // Step 1: Handle IPC buffer serialization carefully
+      let buffer = imageBuffer;
+      if (!Buffer.isBuffer(imageBuffer)) {
+        if (imageBuffer?.type === 'Buffer' && Array.isArray(imageBuffer?.data)) {
+          // Handle Node.js buffer serialization from IPC
+          buffer = Buffer.from(imageBuffer.data);
+          console.debug(`[VisionWorker] Converted IPC serialized buffer: ${buffer.length} bytes`);
+        } else {
+          throw new Error(`Invalid buffer type: ${typeof imageBuffer}, isArray: ${Array.isArray(imageBuffer)}`);
+        }
+      } else {
+        console.debug(`[VisionWorker] Using direct buffer: ${buffer.length} bytes`);
+      }
+      
+      if (!buffer || buffer.length === 0) {
+        throw new Error('Empty or invalid image buffer after conversion');
+      }
+      
+      // Step 2: Use Sharp for EXIF orientation handling (consistent with face detection)
+      console.debug(`[VisionWorker] Applying EXIF rotation and normalizing format...`);
+      const sharpImage = sharp(buffer);
+      
+      // Auto-rotate based on EXIF and convert to JPEG for consistency
+      const processedBuffer = await sharpImage
+        .rotate() // Automatically handles EXIF orientation
+        .jpeg({ quality: 95 }) // High quality for all vision processing
+        .toBuffer();
+        
+      console.debug(`[VisionWorker] Sharp processing complete: ${processedBuffer.length} bytes`);
+      
+      // Step 3: Create OpenCV Mat from processed buffer
+      cvImage = cv.imdecode(processedBuffer);
+      
+      if (!cvImage || cvImage.empty) {
+        throw new Error('Failed to decode processed image buffer with OpenCV');
+      }
+      
+      trackMat(cvImage, `preprocessed image for ${filename}`);
+      console.debug(`[VisionWorker] ✅ Image preprocessing complete: ${cvImage.cols}x${cvImage.rows} pixels`);
+      
+      return cvImage;
+      
+    } catch (error) {
+      console.error(`[VisionWorker] ❌ Image preprocessing failed for ${filename}:`, error.message);
+      console.error(`[VisionWorker] Buffer info: length=${imageBuffer?.length}, type=${typeof imageBuffer}, isBuffer=${Buffer.isBuffer(imageBuffer)}`);
+      
+      // Clean up on error
+      if (cvImage && !cvImage.empty) {
+        safeRelease(cvImage, `failed preprocessing for ${filename}`);
+      }
+      
+      throw error;
+    }
+  }
+
   async handleMessage(message) {
     const { type, requestId } = message;
     
@@ -210,35 +279,8 @@ class VisionWorker {
         this.config = { ...this.config, ...config };
       }
       
-      const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
-      console.debug(`[VisionWorker] Face detection enabled: ${faceDetectionEnabled}`);
-      
-      let result;
-      
-      if (!faceDetectionEnabled) {
-        // Face detection disabled - still run color analysis
-        console.log(`[VisionWorker] 🎬 Face detection disabled in config - running color analysis only`);
-        
-        // Run color analysis
-        let colorAnalysis = null;
-        try {
-          console.debug(`[VisionWorker] Running color analysis...`);
-          colorAnalysis = await this.colorAnalyzer.analyzeColors(imageBuffer);
-          console.debug(`[VisionWorker] Color analysis completed`);
-        } catch (colorError) {
-          console.error(`[VisionWorker] Color analysis failed:`, colorError.message);
-        }
-        
-        result = {
-          faces: [],
-          interestRegions: [],
-          colorAnalysis: colorAnalysis,
-          debugImageBase64: null
-        };
-      } else {
-        // Run complete processing pipeline
-        result = await this.performCompleteVisionProcessing(imageBuffer, filename);
-      }
+      // Run unified processing pipeline with shared preprocessing
+      const result = await this.performUnifiedVisionProcessing(imageBuffer, filename);
       
       const processingTime = Date.now() - startTime;
       logMatMemory("AFTER vision processing (worker)");
@@ -264,6 +306,7 @@ class VisionWorker {
       const errorResult = {
         faces: [],
         interestRegions: [],
+        colorAnalysis: null,
         debugImageBase64: null,
         error: error.message
       };
@@ -281,138 +324,161 @@ class VisionWorker {
   }
 
   /**
-   * Complete Vision Processing Pipeline
-   * Implements detection-only logic - returns all candidates for main process to decide
+   * Unified Vision Processing Pipeline with Shared Preprocessing
+   * Runs face detection, interest detection, and color analysis with single image preprocessing
    */
-  async performCompleteVisionProcessing(imageBuffer, filename) {
-    console.debug(`[VisionWorker] 🔄 Starting complete vision pipeline for ${filename || 'unknown'}`);
+  async performUnifiedVisionProcessing(imageBuffer, filename) {
+    console.debug(`[VisionWorker] 🔄 Starting unified vision pipeline for ${filename || 'unknown'}`);
     
     if (!this.isInitialized || !this.faceDetector || !this.interestDetector || !this.colorAnalyzer) {
       throw new Error('Vision processors not initialized');
     }
     
-    // Configuration for detection
-    const MAX_INTEREST_CANDIDATES = 3;
-    const INTEREST_CONFIDENCE_THRESHOLD = 0.65; // Should match face confidence scale
-    
-    let faces = [];
-    let interestRegions = [];
-    
-    // Step 1: Always try face detection
-    try {
-      console.debug(`[VisionWorker] Step 1: Attempting face detection...`);
-      faces = await this.faceDetector.detectFacesOnly(imageBuffer);
-      console.debug(`[VisionWorker] Face detection found ${faces.length} faces`);
-    } catch (faceError) {
-      console.warn(`[VisionWorker] Face detection failed:`, faceError.message);
-      // Continue with faces = [] (empty array)
-    }
-    
-    // Step 2: Always try interest detection (regardless of faces found)
-    console.debug(`[VisionWorker] Step 2: Running interest detection...`);
-    const matStatsBeforeInterest = getMatStats();
+    let preprocessedImage = null;
     
     try {
-      const interestResult = await this.interestDetector.detectInterestRegions(imageBuffer);
+      // Step 0: Shared preprocessing - buffer handling, EXIF rotation, OpenCV Mat creation
+      preprocessedImage = await this.preprocessImageBuffer(imageBuffer, filename);
       
-      if (interestResult && interestResult.candidates && Array.isArray(interestResult.candidates)) {
-        // Filter and sort candidates by confidence
-        interestRegions = interestResult.candidates
-          .filter(candidate => candidate.confidence >= INTEREST_CONFIDENCE_THRESHOLD)
-          .sort((a, b) => b.confidence - a.confidence)
-          .slice(0, MAX_INTEREST_CANDIDATES);
-        
-        console.debug(`[VisionWorker] Interest detection found ${interestRegions.length} candidates above ${INTEREST_CONFIDENCE_THRESHOLD} threshold`);
-      } else if (interestResult && interestResult.focalPoint) {
-        // Handle legacy single result format
-        interestRegions = [{
-          ...interestResult.focalPoint,
-          confidence: interestResult.confidence || 0.7 // Default confidence for legacy results
-        }];
-        console.debug(`[VisionWorker] Interest detection found 1 legacy result`);
-      }
+      // Configuration for detection
+      const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
+      const interestDetectionEnabled = true; // Always enabled for fallback
+      const colorAnalysisEnabled = true; // Always enabled for theming
       
-      // Check for Mat leaks in interest detection
-      const matStatsAfterInterest = getMatStats();
-      if (matStatsAfterInterest.active > matStatsBeforeInterest.active) {
-        console.warn(`[VisionWorker] ⚠️ Interest detection Mat leak: ${matStatsBeforeInterest.active} -> ${matStatsAfterInterest.active} active objects`);
-      }
+      console.debug(`[VisionWorker] Pipeline config: face=${faceDetectionEnabled}, interest=${interestDetectionEnabled}, color=${colorAnalysisEnabled}`);
       
-    } catch (interestError) {
-      console.error(`[VisionWorker] Interest detection failed:`, interestError.message);
-      console.error(`[VisionWorker] Interest detection error stack:`, interestError.stack);
-      // Continue with interestRegions = [] (empty array)
-    }
-    
-    console.log(`[VisionWorker] ✅ Detection completed: ${faces.length} faces, ${interestRegions.length} interest regions`);
-    
-    // Step 3: Color analysis (always run if enabled)
-    let colorAnalysis = null;
-    try {
-      console.debug(`[VisionWorker] Step 3: Running color analysis...`);
-      colorAnalysis = await this.colorAnalyzer.analyzeColors(imageBuffer);
+      let faces = [];
+      let interestRegions = [];
+      let colorAnalysis = null;
       
-      if (colorAnalysis && colorAnalysis.dominantColors) {
-        console.debug(`[VisionWorker] Color analysis found ${colorAnalysis.dominantColors.length} dominant colors`);
-        colorAnalysis.dominantColors.forEach((color, i) => {
-          console.debug(`[VisionWorker]   #${i + 1}: ${color.hexColor} (${(color.percentage * 100).toFixed(1)}%)`);
-        });
+      // Step 1: Face Detection (if enabled)
+      if (faceDetectionEnabled) {
+        try {
+          console.debug(`[VisionWorker] Step 1: Face detection...`);
+          // Use the preprocessed Mat directly - no buffer handling needed
+          faces = await this.faceDetector.detectFacesFromMat(preprocessedImage);
+          console.debug(`[VisionWorker] Face detection found ${faces.length} faces`);
+        } catch (faceError) {
+          console.warn(`[VisionWorker] Face detection failed:`, faceError.message);
+          // Continue with faces = [] (empty array)
+        }
       } else {
-        console.debug(`[VisionWorker] Color analysis found no dominant colors`);
+        console.debug(`[VisionWorker] Step 1: Face detection disabled by config`);
       }
       
-    } catch (colorError) {
-      console.error(`[VisionWorker] Color analysis failed:`, colorError.message);
-      // Continue without color analysis
-    }
-    
-    // Step 4: Create debug image if requested
-    let debugImageBase64 = null;
-    if (this.config?.debugMode) {
-      try {
-        console.debug(`[VisionWorker] Creating debug image for ${filename || 'unknown'} (${faces.length} faces, ${interestRegions.length} interests, colors: ${colorAnalysis?.dominantColors?.length || 0})`);
-        debugImageBase64 = await this.createDebugImage(imageBuffer, faces, interestRegions, colorAnalysis);
-        console.debug(`[VisionWorker] Debug image created successfully`);
-      } catch (debugError) {
-        console.warn(`[VisionWorker] Debug image creation failed:`, debugError.message);
+      // Step 2: Interest Detection (if enabled)
+      if (interestDetectionEnabled) {
+        console.debug(`[VisionWorker] Step 2: Interest detection...`);
+        const matStatsBeforeInterest = getMatStats();
+        
+        try {
+          // Use the preprocessed Mat directly - no buffer handling needed
+          const interestResult = await this.interestDetector.detectInterestRegionsFromMat(preprocessedImage);
+          
+          if (interestResult && interestResult.candidates && Array.isArray(interestResult.candidates)) {
+            const MAX_INTEREST_CANDIDATES = 3;
+            const INTEREST_CONFIDENCE_THRESHOLD = 0.65;
+            
+            // Filter and sort candidates by confidence
+            interestRegions = interestResult.candidates
+              .filter(candidate => candidate.confidence >= INTEREST_CONFIDENCE_THRESHOLD)
+              .sort((a, b) => b.confidence - a.confidence)
+              .slice(0, MAX_INTEREST_CANDIDATES);
+            
+            console.debug(`[VisionWorker] Interest detection found ${interestRegions.length} candidates above ${INTEREST_CONFIDENCE_THRESHOLD} threshold`);
+          } else if (interestResult && interestResult.focalPoint) {
+            // Handle legacy single result format
+            interestRegions = [{
+              ...interestResult.focalPoint,
+              confidence: interestResult.confidence || 0.7 // Default confidence for legacy results
+            }];
+            console.debug(`[VisionWorker] Interest detection found 1 legacy result`);
+          }
+          
+          // Check for Mat leaks in interest detection
+          const matStatsAfterInterest = getMatStats();
+          if (matStatsAfterInterest.active > matStatsBeforeInterest.active) {
+            console.warn(`[VisionWorker] ⚠️ Interest detection Mat leak: ${matStatsBeforeInterest.active} -> ${matStatsAfterInterest.active} active objects`);
+          }
+          
+        } catch (interestError) {
+          console.error(`[VisionWorker] Interest detection failed:`, interestError.message);
+          console.error(`[VisionWorker] Interest detection error stack:`, interestError.stack);
+          // Continue with interestRegions = [] (empty array)
+        }
+      } else {
+        console.debug(`[VisionWorker] Step 2: Interest detection disabled by config`);
+      }
+      
+      // Step 3: Color Analysis (if enabled)
+      if (colorAnalysisEnabled) {
+        try {
+          console.debug(`[VisionWorker] Step 3: Color analysis...`);
+          // Use the preprocessed Mat directly - no buffer handling needed
+          colorAnalysis = await this.colorAnalyzer.analyzeColorsFromMat(preprocessedImage);
+          
+          if (colorAnalysis && colorAnalysis.dominantColors) {
+            console.debug(`[VisionWorker] Color analysis found ${colorAnalysis.dominantColors.length} dominant colors`);
+            colorAnalysis.dominantColors.forEach((color, i) => {
+              console.debug(`[VisionWorker]   #${i + 1}: ${color.hexColor} (${(color.percentage * 100).toFixed(1)}%)`);
+            });
+          } else {
+            console.debug(`[VisionWorker] Color analysis found no dominant colors`);
+          }
+          
+        } catch (colorError) {
+          console.error(`[VisionWorker] Color analysis failed:`, colorError.message);
+          // Continue without color analysis
+        }
+      } else {
+        console.debug(`[VisionWorker] Step 3: Color analysis disabled by config`);
+      }
+      
+      console.log(`[VisionWorker] ✅ Unified pipeline completed: ${faces.length} faces, ${interestRegions.length} interest regions, colors: ${colorAnalysis?.dominantColors?.length || 0}`);
+      
+      // Step 4: Create debug image if requested
+      let debugImageBase64 = null;
+      if (this.config?.debugMode) {
+        try {
+          console.debug(`[VisionWorker] Creating debug image for ${filename || 'unknown'}`);
+          // Use the preprocessed Mat directly for debug image
+          debugImageBase64 = await this.createDebugImageFromMat(preprocessedImage, faces, interestRegions, colorAnalysis);
+          console.debug(`[VisionWorker] Debug image created successfully`);
+        } catch (debugError) {
+          console.warn(`[VisionWorker] Debug image creation failed:`, debugError.message);
+        }
+      }
+      
+      return {
+        faces,
+        interestRegions,
+        colorAnalysis,
+        debugImageBase64
+      };
+      
+    } finally {
+      // CRITICAL: Release the shared preprocessed image
+      if (preprocessedImage && !preprocessedImage.empty) {
+        safeRelease(preprocessedImage, `preprocessed image for ${filename}`);
       }
     }
-    
-    return {
-      faces,
-      interestRegions,
-      colorAnalysis,
-      debugImageBase64
-    };
   }
 
   /**
-   * Create debug image with face boxes, interest region overlays, and color swatches
-   * @param {Buffer} imageBuffer - Original image buffer
+   * Create debug image with face boxes, interest region overlays, and color swatches from Mat
+   * @param {cv.Mat} preprocessedImage - Preprocessed OpenCV Mat
    * @param {Array} faces - Array of face detection results
    * @param {Array} interestRegions - Array of interest region candidates (ordered by confidence)
    * @param {Object} colorAnalysis - Color analysis results with dominant colors
    * @returns {Promise<string>} Base64 encoded debug image
    */
-  async createDebugImage(imageBuffer, faces, interestRegions, colorAnalysis) {
+  async createDebugImageFromMat(preprocessedImage, faces, interestRegions, colorAnalysis) {
     let debugImage = null;
     
     try {
-      // Handle IPC serialized buffers
-      if (imageBuffer && typeof imageBuffer === 'object' && imageBuffer.type === 'Buffer' && Array.isArray(imageBuffer.data)) {
-        imageBuffer = Buffer.from(imageBuffer.data);
-      }
-      
-      // Load image using Sharp first for EXIF handling
-      const sharp = require('sharp');
-      const processedBuffer = await sharp(imageBuffer)
-        .rotate() // Handle EXIF orientation
-        .jpeg({ quality: 95 })
-        .toBuffer();
-      
-      // Convert to OpenCV Mat
-      debugImage = cv.imdecode(processedBuffer);
-      trackMat(debugImage, 'debug image');
+      // Use the preprocessed image directly - no need to decode buffer again
+      debugImage = preprocessedImage.copy();
+      trackMat(debugImage, 'debug image copy');
       
       // Draw face rectangles in green
       faces.forEach((face, index) => {

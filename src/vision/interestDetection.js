@@ -691,6 +691,68 @@ class InterestDetector {
       safeRelease(image, 'decoded image');
     }
   }
+
+  /**
+   * Interest detection using pre-processed OpenCV Mat
+   * @param {Mat} image - Pre-processed OpenCV Mat
+   * @returns {Promise<Object|null>} Interest detection result with candidates array
+   */
+  async detectInterestRegionsFromMat(image) {
+    try {
+      if (!image || image.empty) {
+        throw new Error('Invalid or empty image Mat for interest detection');
+      }
+      
+      console.log(`[InterestDetector] Starting interest region detection from Mat (${image.cols}x${image.rows} pixels)`);
+      
+      // Use the existing interest detection (now returns array)
+      const interestCandidates = await this.findInterestingRegion(image);
+      
+      if (interestCandidates && interestCandidates.length > 0) {
+        // Convert each candidate to the expected format
+        const candidates = interestCandidates.map(candidate => ({
+          x: candidate.x,
+          y: candidate.y,
+          width: candidate.width,
+          height: candidate.height,
+          confidence: candidate.confidence,
+          score: candidate.score,
+          type: candidate.type || 'interest',
+          method: candidate.method || 'interest_detection',
+          rank: candidate.rank || 1
+        }));
+        
+        console.log(`[InterestDetector] Found ${candidates.length} interest region candidates`);
+        candidates.forEach((candidate, i) => {
+          console.log(`[InterestDetector]   #${i + 1}: ${candidate.type} (confidence: ${candidate.confidence.toFixed(2)}, score: ${candidate.score.toFixed(1)})`);
+        });
+        
+        // Return in format expected by vision-worker
+        return { 
+          candidates: candidates,
+          // Keep legacy fields for backward compatibility
+          focalPoint: candidates[0], // First candidate as primary focal point
+          confidence: candidates[0].confidence
+        };
+      }
+      
+      console.log(`[InterestDetector] No interest regions found`);
+      return { 
+        candidates: [],
+        focalPoint: null,
+        confidence: 0
+      };
+      
+    } catch (error) {
+      console.error(`[InterestDetector] Interest region detection from Mat failed:`, error.message);
+      return { 
+        candidates: [],
+        focalPoint: null,
+        confidence: 0
+      };
+    }
+    // Note: No image cleanup needed - Mat is managed by caller
+  }
 }
 
 module.exports = InterestDetector;
