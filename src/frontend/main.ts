@@ -649,7 +649,7 @@ createStaticBackdropKeyframes: function(): void {
     elementToAnimate.style.setProperty('--start-y', `${startTranslateY}%`);
     
     // Apply the CSS animation
-    elementToAnimate.style.animation = `ken-burns-static ${totalDuration}s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards`;
+    elementToAnimate.style.animation = `ken-burns-static ${totalDuration}s linear forwards`;
 
     // Store a reference for cleanup (create a fake Animation object for compatibility)
     const fakeAnimation = {
