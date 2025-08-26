@@ -635,7 +635,7 @@ createStaticBackdropKeyframes: function(): void {
     // Create the animation
     const animation = elementToAnimate.animate(keyframes, {
       duration: totalDuration * 1000, // Convert to milliseconds
-      easing: 'cubic-bezier(0.25, 0.46, 0.45, 0.94)', // easeOutQuad - gentler movement for Pi
+      easing: 'linear',
       fill: 'forwards'
     });
 
