@@ -368,8 +368,8 @@ class VisionWorker {
       preprocessedImage = await this.preprocessImageBuffer(imageBuffer, filename);
       
       // Configuration for detection
-      const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
-      const interestDetectionEnabled = true; // Always enabled for fallback
+      const faceDetectionEnabled = false; //this.config?.faceDetection?.enabled !== false;
+      const interestDetectionEnabled = false; // Always enabled for fallback
       const colorAnalysisEnabled = false; // Always enabled for theming
       
       console.debug(`[VisionWorker] Pipeline config: face=${faceDetectionEnabled}, interest=${interestDetectionEnabled}, color=${colorAnalysisEnabled}`);
