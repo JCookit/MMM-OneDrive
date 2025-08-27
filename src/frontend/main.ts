@@ -76,16 +76,145 @@ Module.register<Config>("MMM-OneDrive", {
     }
 
     // Initialize photo caching system
-    this.photoCache = null; // Will store: { photo, photoBase64, album, interestingRectangleResult }
+    this.photoCache = null; // Will store: { photo, photoBuffer, mimeType, album, interestingRectangleResult }
     this.displayTimer = null;
     this.processingRequested = false;
+    this.currentBlobUrl = null; // For blob URL cleanup
+    this.currentDebugBlobUrl = null; // For debug image blob URL cleanup
 
-    console.log("[MMM-OneDrive] Frontend initialized with caching system");
+    console.log("[MMM-OneDrive] Frontend initialized with caching system and blob URL management");
     this.sendSocketNotification("INIT", config);
     this.dynamicPosition = 0;
     
     // Immediately request first photo to start the pipeline
     this.requestNextPhoto();
+  },
+
+  /**
+   * Extract text-friendly colors from vision analysis results
+   * Only brightens colors if they are too dark for good text readability
+   * @param dominantColors - Array of dominant colors from vision analysis
+   * @param count - Number of text colors to return (default: 2)
+   * @returns Array of text-friendly colors for UI elements
+   */
+  getTextFriendlyColors: function(dominantColors: any[], count: number = 2): any[] {
+    if (!dominantColors || dominantColors.length === 0) {
+      return [];
+    }
+    
+    const BRIGHTNESS_THRESHOLD = 0.45; // Only brighten if below 45% brightness
+    const BRIGHTENING_FACTOR = 0.5;   // Conservative 50% brightening
+    
+    return dominantColors.slice(0, count).map((color: any, index: number) => {
+      const brightness = color.hsv?.v || 0;
+      let finalRgb = [...(color.rgb || [255, 255, 255])];
+      let wasBrightened = false;
+      
+      // Only brighten if the color is too dark for text readability
+      if (brightness < BRIGHTNESS_THRESHOLD) {
+        const [r, g, b] = finalRgb;
+        
+        // Conservative brightening - move toward white by the brightening factor
+        finalRgb = [
+          Math.min(255, Math.round(r + (255 - r) * BRIGHTENING_FACTOR)),
+          Math.min(255, Math.round(g + (255 - g) * BRIGHTENING_FACTOR)),
+          Math.min(255, Math.round(b + (255 - b) * BRIGHTENING_FACTOR))
+        ];
+        
+        wasBrightened = true;
+      }
+      
+      const finalHex = `#${finalRgb.map(c => c.toString(16).padStart(2, '0')).join('')}`;
+      const finalBrightness = (finalRgb[0] + finalRgb[1] + finalRgb[2]) / (3 * 255);
+      
+      return {
+        ...color,
+        rgb: finalRgb,
+        hexColor: finalHex,
+        brightness: finalBrightness,
+        wasBrightened,
+        originalRgb: color.rgb,
+        originalHex: color.hexColor,
+        textRole: index === 0 ? 'date' : 'location', // First for date, second for location
+      };
+    });
+  },
+
+  /**
+   * Find the most vibrant non-grey/white/brown color for UI theming
+   * @param dominantColors - Array of dominant colors from vision analysis
+   * @returns Object with vibrant color info or null if none found
+   */
+  getMostVibrantColor: function(dominantColors: any[]): any {
+    if (!dominantColors || dominantColors.length === 0) {
+      return null;
+    }
+
+    // Helper function to check if a color is "boring" (grey, white, brown)
+    const isBoringColor = (color: any) => {
+      const { h, s, v } = color.hsv || { h: 0, s: 0, v: 0 };
+      
+      // Very low saturation = grey/white (regardless of hue)
+      if (s < 0.2) return true;
+      
+      // Very high brightness + low saturation = white-ish
+      if (v > 0.9 && s < 0.3) return true;
+      
+      // Brown-ish colors (hue between 20-60 degrees with low saturation)
+      if (h >= 20 && h <= 60 && s < 0.3) return true;
+      
+      return false;
+    };
+
+    // Find vibrant colors, sorted by vibrancy score
+    const vibrantColors = dominantColors
+      .filter(color => !isBoringColor(color))
+      .map(color => ({
+        ...color,
+        vibrancyScore: (color.hsv?.s || 0) * (color.hsv?.v || 0) * (color.unifiedScore || 0) // Saturation × Brightness × Importance
+      }))
+      .sort((a, b) => b.vibrancyScore - a.vibrancyScore);
+
+    return vibrantColors.length > 0 ? vibrantColors[0] : null;
+  },
+
+  /**
+   * Apply default or themed styling to photo info elements
+   * @param info - Info container element
+   * @param photoTime - Time element  
+   * @param photoLocation - Location element
+   * @param vibrantColor - Optional vibrant color for theming
+   */
+  applyPhotoInfoStyling: function(info: HTMLElement, photoTime: HTMLElement, photoLocation: HTMLElement, vibrantColor?: any): void {
+    if (vibrantColor) {
+      // Use vibrant color theming
+      const themeColor = vibrantColor.hexColor;
+      
+      // Create a darker version for background (darken RGB values, keep high opacity)
+      const rgb = vibrantColor.rgb || [100, 100, 100];
+      const darkenedRgb = rgb.map(channel => Math.max(0, Math.round(channel * 0.5))); // Darken to 30% of original
+      const darkBackground = `rgba(${darkenedRgb[0]}, ${darkenedRgb[1]}, ${darkenedRgb[2]}, 0.8)`; // High opacity
+      
+      // Apply themed styling
+      info.style.borderLeft = `4px solid ${themeColor}`;
+      info.style.backgroundColor = darkBackground;
+      
+      console.debug(`[MMM-OneDrive] Applied vibrant theming: ${themeColor} with darkened background`);
+    } else {
+      // Fallback: white border with dark background
+      info.style.borderLeft = '4px solid white';
+      info.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+      
+      console.debug("[MMM-OneDrive] Using default white border theming");
+    }
+    
+    // Always apply consistent text styling
+    photoTime.style.color = 'white';
+    photoTime.style.fontWeight = 'bold';
+    if (photoLocation.innerHTML) {
+      photoLocation.style.color = 'white';
+      photoLocation.style.fontWeight = 'normal';
+    }
   },
 
   socketNotificationReceived: function (noti, payload) {
@@ -169,16 +298,62 @@ Module.register<Config>("MMM-OneDrive", {
 
     console.log("[MMM-OneDrive] 📺 Displaying cached photo:", this.photoCache.photo.filename);
     
-    const { photo, photoBase64, album, interestingRectangleResult } = this.photoCache;
-    const url = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${photoBase64}`;
+    const { photo, photoBuffer, mimeType, album, interestingRectangleResult } = this.photoCache;
     
-    // Use marked image if face detection was performed and rectangles were burned in
-    const displayUrl = interestingRectangleResult?.markedImageUrl || url;
+    // Debug logging for troubleshooting
+    console.debug("[MMM-OneDrive] Photo cache contents:", {
+      hasPhotoBuffer: !!photoBuffer,
+      photoBufferSize: photoBuffer?.length || 0,
+      mimeType,
+      hasInterestingRectangleResult: !!interestingRectangleResult,
+      hasDebugImageBuffer: !!interestingRectangleResult?.debugImageBuffer,
+      debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0
+    });
     
-    // Pass face detection focal point if available
-    const focalPoint = interestingRectangleResult?.focalPoint || null;
+    // Convert raw buffer to Blob URL (more efficient than base64)
+    const blob = new Blob([photoBuffer], { type: mimeType });
+    const url = URL.createObjectURL(blob);
     
-    this.render(displayUrl, photo, album, focalPoint);
+    // Store blob URL for cleanup later
+    if (this.currentBlobUrl) {
+      URL.revokeObjectURL(this.currentBlobUrl);
+    }
+    this.currentBlobUrl = url;
+    
+    // Handle debug image if present (convert binary buffer to blob URL)
+    let displayUrl = url; // Default to main photo blob URL
+    
+    if (interestingRectangleResult?.debugImageBuffer) {
+      try {
+        console.debug("[MMM-OneDrive] 🔍 Processing debug image buffer...");
+        
+        // Convert debug image buffer to blob URL
+        const debugBlob = new Blob([interestingRectangleResult.debugImageBuffer], { type: 'image/jpeg' });
+        const debugBlobUrl = URL.createObjectURL(debugBlob);
+        
+        // Clean up previous debug blob URL
+        if (this.currentDebugBlobUrl) {
+          URL.revokeObjectURL(this.currentDebugBlobUrl);
+        }
+        this.currentDebugBlobUrl = debugBlobUrl;
+        
+        // Use debug image for display
+        displayUrl = debugBlobUrl;
+        
+        console.debug(`[MMM-OneDrive] ✅ Created debug image blob URL (${interestingRectangleResult.debugImageBuffer.length} bytes)`);
+        
+      } catch (error) {
+        console.error(`[MMM-OneDrive] ❌ Failed to create debug image blob URL:`, error);
+        // Fall back to main image
+        displayUrl = url;
+      }
+    } else {
+      console.debug("[MMM-OneDrive] ℹ️ No debug image buffer found, using main image");
+    }
+    
+    console.debug(`[MMM-OneDrive] Display URL type: ${displayUrl.startsWith('blob:') ? 'blob' : 'other'}`);
+    
+    this.render(displayUrl, photo, album, interestingRectangleResult);
     
     // Start next photo processing immediately after consuming cached photo
     this.requestNextPhoto();
@@ -212,24 +387,36 @@ Module.register<Config>("MMM-OneDrive", {
     if (document.getElementById('ken-burns-static')) return;
     
     const staticKeyframes = `
+      /* Hardware acceleration optimization for Ken Burns */
+      #ONEDRIVE_PHOTO_CURRENT, #ONEDRIVE_PHOTO_CURRENT img {
+        /* Force GPU acceleration */
+        will-change: transform, opacity;
+        transform-style: preserve-3d;
+        backface-visibility: hidden;
+        
+        /* Optimize rendering */
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        
+        /* Ensure hardware compositing */
+        transform: translateZ(0);
+      }
+
       @keyframes ken-burns-static {
         0% {
           opacity: 0;
-          transform: scale(var(--start-scale, 1.5)) translate(var(--start-x, 0%), var(--start-y, 0%));
-          overflow: hidden;
+          transform: scale3d(var(--start-scale, 1.5), var(--start-scale, 1.5), 1) 
+                     translate3d(var(--start-x, 0%), var(--start-y, 0%), 0);
         }
         10% {
           opacity: 1;
-          overflow: hidden;
         }
         90% {
           opacity: 1;
-          overflow: hidden;
         }
         100% {
           opacity: 0;
-          transform: translate(0%, 0%) scale(1.0);
-          overflow: hidden;
+          transform: scale3d(1.0, 1.0, 1) translate3d(0%, 0%, 0);
         }
       }
     `;
@@ -268,29 +455,33 @@ createStaticBackdropKeyframes: function(): void {
   document.head.appendChild(styleElement);
 },
 
-  render: function (url: string, target: OneDriveMediaItem, album: DriveItem, focalPoint?: any) {
+  render: function (url: string, target: OneDriveMediaItem, album: DriveItem, visionResults?: any) {
     if (this.suspended) {
       console.debug("[MMM-OneDrive] Module is suspended, skipping render");
       return;
     }
+    const focalPoint = visionResults?.focalPoint || null;
     const startDt = new Date();
     const back = document.getElementById("ONEDRIVE_PHOTO_BACKDROP");
     const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
     current.textContent = "";
     
     // ==================== IMAGE RENDERING METHOD SWITCH ==================== 
-    // Toggle: true = <img> elements with transforms (Pi5-friendly)
-    //         false = <div> with background-image (original approach)
-    const USE_IMG_ELEMENTS = false; // Set to true to test new approach
+    // Toggle: true = <img> elements with transforms
+    //         false = <div> with background-image (potentially smoother on Pi)
+    const USE_IMG_ELEMENTS = true; // Set to true to test IMG approach
     
     if (USE_IMG_ELEMENTS) {
       // New approach: Use <img> elements instead of background-image
       back.style.backgroundImage = `url(${url})`; // Keep backdrop as background for blur effect
-      current.innerHTML = `<img src="${url}" style="width: 100%; height: 100%; object-fit: cover; display: block;">`;
+      current.innerHTML = `<img src="${url}" style="width: 100%; height: 100%; object-fit: contain; display: block;">`;
     } else {
       // Original approach: background-image on divs
       back.style.backgroundImage = `url(${url})`;
       current.style.backgroundImage = `url(${url})`;
+      current.style.backgroundSize = 'contain';
+      current.style.backgroundPosition = 'center center';
+      current.style.backgroundRepeat = 'no-repeat';
     }
 
     // Clear any existing animation
@@ -397,26 +588,140 @@ createStaticBackdropKeyframes: function(): void {
       // Allow the default .animated class to apply the trans animation
     }
     
-    this.applyCommonStyling(current, target, album, startDt, this.config.kenBurnsEffect !== false);
+    this.applyCommonStyling(current, target, album, startDt, this.config.kenBurnsEffect !== false, visionResults);
 
   },
 
   applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, focalPoint?: any): void {
     const totalDuration = (this.config.updateInterval/1000); 
     
-    // ==================== ANIMATION METHOD SWITCH ==================== 
-    // Toggle: true = Web Animations API (more explicit memory control)
-//         false = CSS animations (original approach)
-const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
-    
-    if (USE_WEB_ANIMATIONS_API) {
-      this.applyWebAnimationsKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
-    } else {
-      this.applyCSSAnimationKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
-    }
+    // Using CSS keyframes instead of Web Animations API for better Pi performance
+    this.applyCSSKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
   },
 
-  // NEW: Web Animations API implementation
+  // CSS keyframes implementation - potentially smoother on Pi
+  applyCSSKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any): void {
+    // Create the CSS keyframes first
+    this.createStaticKenBurnsKeyframes();
+    
+    // Get image dimensions for scale calculation
+    const imageWidth = Number(target.mediaMetadata?.width) || 0;
+    const imageHeight = Number(target.mediaMetadata?.height) || 0;
+    
+    // Check if we're using IMG elements or background-image approach
+    const imgElement = current.querySelector('img') as HTMLImageElement;
+    const isUsingImgElement = imgElement !== null;
+    const elementToAnimate = isUsingImgElement ? imgElement : current;
+    
+    // Calculate optimal starting scale based on focal point rectangle
+    let startScale = 1.5; // Default fallback
+    
+    if (focalPoint && imageWidth && imageHeight) {
+      // Calculate focal point dimensions as percentages of image
+      const focalWidthPercent = (focalPoint.width / imageWidth) * 100;
+      const focalHeightPercent = (focalPoint.height / imageHeight) * 100;
+      
+      // Calculate required scale to make focal point fit the screen
+      const scaleForWidth = 100 / focalWidthPercent;
+      const scaleForHeight = 100 / focalHeightPercent;
+      
+      // Use the smaller scale to ensure both dimensions fit
+      const optimalScale = Math.min(scaleForWidth, scaleForHeight);
+      
+      // Clamp the scale to reasonable bounds (1.1x to 2.5x to prevent memory issues)
+      startScale = Math.max(1.1, Math.min(2.5, optimalScale));
+      
+      console.debug("[MMM-OneDrive] Focal point scale calculation:", {
+        focalWidthPercent: focalWidthPercent.toFixed(1),
+        focalHeightPercent: focalHeightPercent.toFixed(1),
+        finalStartScale: startScale.toFixed(2)
+      });
+    }
+
+    // Calculate pan offsets to center the focal point at start
+    let startTranslateX = 0;
+    let startTranslateY = 0;
+    
+    if (focalPoint && this.config.kenBurnsCenterStart !== false) {
+      elementToAnimate.style.transformOrigin = 'center center';
+      
+      if (isUsingImgElement) {
+        // For IMG elements with object-fit: contain
+        startTranslateX = 50 - cropX; // Simple translation for IMG elements
+        startTranslateY = 50 - cropY;
+      } else {
+        // For DIV with background-image: contain
+        startTranslateX = 50 - cropX; // Same calculation for background-image
+        startTranslateY = 50 - cropY;
+      }
+      
+      console.debug("[MMM-OneDrive] Pan calculation:", {
+        method: isUsingImgElement ? "IMG element" : "background-image",
+        focalCenter: `${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`,
+        translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`
+      });
+    }
+
+    // Cancel any existing animation
+    if (current.kenBurnsAnimation) {
+      current.kenBurnsAnimation.cancel();
+      delete current.kenBurnsAnimation;
+    }
+    
+    // Reset element to clean state
+    if (isUsingImgElement) {
+      // Reset img element
+      elementToAnimate.style.animation = 'none';
+      elementToAnimate.style.opacity = '1';
+      elementToAnimate.style.transform = '';
+      current.style.overflow = 'hidden'; // Keep overflow on container
+      
+      // Apply hardware acceleration to IMG element
+      elementToAnimate.style.willChange = 'transform, opacity';
+      elementToAnimate.style.backfaceVisibility = 'hidden';
+      elementToAnimate.style.transformStyle = 'preserve-3d';
+    } else {
+      // Reset div with background-image
+      current.style.animation = 'none';
+      current.classList.remove('animated');
+      current.style.opacity = '1';
+      current.style.transform = '';
+      current.style.overflow = 'hidden';
+      
+      // Apply hardware acceleration to DIV element
+      current.style.willChange = 'transform, opacity';
+      current.style.backfaceVisibility = 'hidden';
+      current.style.transformStyle = 'preserve-3d';
+    }
+
+    // Set CSS custom properties for keyframes
+    elementToAnimate.style.setProperty('--start-scale', startScale.toString());
+    elementToAnimate.style.setProperty('--start-x', `${startTranslateX}%`);
+    elementToAnimate.style.setProperty('--start-y', `${startTranslateY}%`);
+    
+    // Apply the CSS animation
+    elementToAnimate.style.animation = `ken-burns-static ${totalDuration}s linear forwards`;
+
+    // Store a reference for cleanup (create a fake Animation object for compatibility)
+    const fakeAnimation = {
+      cancel: () => {
+        elementToAnimate.style.animation = 'none';
+        elementToAnimate.style.removeProperty('--start-scale');
+        elementToAnimate.style.removeProperty('--start-x');
+        elementToAnimate.style.removeProperty('--start-y');
+      }
+    };
+    current.kenBurnsAnimation = fakeAnimation as Animation;
+
+    console.debug("[MMM-OneDrive] CSS Ken Burns animation started:", { 
+      method: isUsingImgElement ? "IMG element" : "background-image",
+      totalDuration: `${totalDuration}s`,
+      filename: target.filename,
+      hasFocalPoint: !!focalPoint
+    });
+  },
+
+  // Web Animations API implementation - supports both IMG and DIV approaches
   applyWebAnimationsKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any): void {
     // Get image dimensions for scale calculation
     const imageWidth = Number(target.mediaMetadata?.width) || 0;
@@ -445,10 +750,9 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       // Clamp the scale to reasonable bounds (1.1x to 2.5x to prevent memory issues)
       startScale = Math.max(1.1, Math.min(2.5, optimalScale));
       
-      console.debug("[MMM-OneDrive] Web Animations - Focal point scale calculation:", {
+      console.debug("[MMM-OneDrive] Focal point scale calculation:", {
         focalWidthPercent: focalWidthPercent.toFixed(1),
         focalHeightPercent: focalHeightPercent.toFixed(1),
-        optimalScale: optimalScale.toFixed(2),
         finalStartScale: startScale.toFixed(2)
       });
     }
@@ -458,20 +762,19 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
     let startTranslateY = 0;
     
     if (focalPoint && this.config.kenBurnsCenterStart !== false) {
-      // For IMG elements, we need to adjust translation calculations
-      // because transform-origin is different than background-position
+      elementToAnimate.style.transformOrigin = 'center center';
+      
       if (isUsingImgElement) {
-        // For <img> elements, calculate translation to move focal point to center
-        // This is more straightforward than background-image positioning
-        startTranslateX = 50 - cropX; 
+        // For IMG elements with object-fit: contain
+        startTranslateX = 50 - cropX; // Simple translation for IMG elements
         startTranslateY = 50 - cropY;
       } else {
-        // Original background-image calculation
-        startTranslateX = 50 - cropX; 
+        // For DIV with background-image: contain
+        startTranslateX = 50 - cropX; // Same calculation for background-image
         startTranslateY = 50 - cropY;
       }
       
-      console.debug("[MMM-OneDrive] Web Animations - Pan calculation:", {
+      console.debug("[MMM-OneDrive] Pan calculation:", {
         method: isUsingImgElement ? "IMG element" : "background-image",
         focalCenter: `${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`,
         translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`
@@ -491,39 +794,58 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       elementToAnimate.style.opacity = '1';
       elementToAnimate.style.transform = '';
       current.style.overflow = 'hidden'; // Keep overflow on container
+      
+      // Apply hardware acceleration to IMG element
+      elementToAnimate.style.willChange = 'transform, opacity';
+      elementToAnimate.style.backfaceVisibility = 'hidden';
+      elementToAnimate.style.transformStyle = 'preserve-3d';
     } else {
-      // Reset div with background-image (original behavior)
+      // Reset div with background-image
       current.style.animation = 'none';
       current.classList.remove('animated');
       current.style.opacity = '1';
       current.style.transform = '';
       current.style.overflow = 'hidden';
+      
+      // Apply hardware acceleration to DIV element
+      current.style.willChange = 'transform, opacity';
+      current.style.backfaceVisibility = 'hidden';
+      current.style.transformStyle = 'preserve-3d';
     }
 
-    // Define keyframes for Web Animations API
+    // startScale = 1.0;  // temporary!
+    // startTranslateX = 0;
+    // startTranslateY = 0;
+
+    // Define keyframes for Web Animations API using 3D transforms
     const keyframes = [
       {
         // 0% - Start: fade in, scaled and translated to focal point
         opacity: 0,
-        transform: `scale(${startScale}) translate(${startTranslateX}%, ${startTranslateY}%)`
+        transform: `scale3d(${startScale}, ${startScale}, 1) translate3d(${startTranslateX}%, ${startTranslateY}%, 0)`
       },
       {
-        // 10% - Fade in complete, still at focal point
+        // 10% - Fade in complete
         opacity: 1,
-        transform: `scale(${startScale}) translate(${startTranslateX}%, ${startTranslateY}%)`,
         offset: 0.1
       },
       {
-        // 90% - Still visible, animated to normal position and scale
+        // 90% - Still visible
         opacity: 1,
-        transform: `scale(1.0) translate(0%, 0%)`,
-        offset: 0.9
+        offset: 0.88
+      },
+      {
+        // 100% - Fade out complete, final position
+        opacity: 0,
+        transform: `scale3d(1.0, 1.0, 1) translate3d(0%, 0%, 0)`,
+        offset: 0.98 // cut it a little short to allow for pi slowness
       },
       {
         // 100% - Fade out complete
         opacity: 0,
-        transform: `scale(1.0) translate(0%, 0%)`
+        transform: `scale3d(1.0, 1.0, 1) translate3d(0%, 0%, 0)`,
       }
+
     ];
 
     // Create the animation
@@ -541,7 +863,7 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       if (current.kenBurnsAnimation === animation) {
         delete current.kenBurnsAnimation;
       }
-      console.debug("[MMM-OneDrive] Web Animation completed and cleaned up");
+      console.debug("[MMM-OneDrive] Web Animation completed");
     });
 
     // Clean up if animation is cancelled
@@ -549,126 +871,18 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       if (current.kenBurnsAnimation === animation) {
         delete current.kenBurnsAnimation;
       }
-      console.debug("[MMM-OneDrive] Web Animation cancelled and cleaned up");
+      console.debug("[MMM-OneDrive] Web Animation cancelled");
     });
 
-    console.debug("[MMM-OneDrive] Ken Burns Web Animation started:", { 
-      method: isUsingImgElement ? "IMG element transforms" : "DIV background-image transforms",
+    console.debug("[MMM-OneDrive] Ken Burns animation started:", { 
+      method: isUsingImgElement ? "IMG element" : "background-image",
       totalDuration: `${totalDuration}s`,
       filename: target.filename,
-      hasFocalPoint: !!focalPoint,
-      startScale: startScale.toFixed(2),
-      translation: `${startTranslateX}%, ${startTranslateY}%`,
-      keyframes: keyframes.length
+      hasFocalPoint: !!focalPoint
     });
   },
 
-  // ORIGINAL: CSS Animation implementation (kept as fallback)
-  // Original CSS implementation  
-  applyCSSAnimationKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any): void {
-    // Ensure static keyframes exist
-    this.createStaticKenBurnsKeyframes();
-    
-    // Check if we're using IMG elements or background-image approach
-    const imgElement = current.querySelector('img') as HTMLImageElement;
-    const isUsingImgElement = imgElement !== null;
-    const elementToAnimate = isUsingImgElement ? imgElement : current;
-    
-    // Get image dimensions for scale calculation
-    const imageWidth = Number(target.mediaMetadata?.width) || 0;
-    const imageHeight = Number(target.mediaMetadata?.height) || 0;
-    
-    // Calculate optimal starting scale based on focal point rectangle
-    let startScale = 1.5; // Default fallback
-    
-    if (focalPoint && imageWidth && imageHeight) {
-      // Calculate focal point dimensions as percentages of image
-      const focalWidthPercent = (focalPoint.width / imageWidth) * 100;
-      const focalHeightPercent = (focalPoint.height / imageHeight) * 100;
-      
-      // Calculate required scale to make focal point fit the screen
-      const scaleForWidth = 100 / focalWidthPercent;
-      const scaleForHeight = 100 / focalHeightPercent;
-      
-      // Use the smaller scale to ensure both dimensions fit
-      const optimalScale = Math.min(scaleForWidth, scaleForHeight);
-      
-      // Clamp the scale to reasonable bounds (1.1x to 2.5x to prevent memory issues)
-      startScale = Math.max(1.1, Math.min(2.5, optimalScale));
-      
-      console.debug("[MMM-OneDrive] CSS Animation - Focal point scale calculation:", {
-        focalWidthPercent: focalWidthPercent.toFixed(1),
-        focalHeightPercent: focalHeightPercent.toFixed(1),
-        optimalScale: optimalScale.toFixed(2),
-        finalStartScale: startScale.toFixed(2)
-      });
-    }
-
-    // Calculate pan offsets to center the focal point at start
-    let startTranslateX = 0;
-    let startTranslateY = 0;
-    
-    if (focalPoint && this.config.kenBurnsCenterStart !== false) {
-      // Calculate translation needed to move focal point to screen center (50%, 50%)
-      startTranslateX = 50 - cropX; 
-      startTranslateY = 50 - cropY;
-      
-      console.debug("[MMM-OneDrive] CSS Animation - Pan calculation:", {
-        method: isUsingImgElement ? "IMG element" : "background-image",
-        focalCenter: `${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`,
-        translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`
-      });
-    }
-    
-    // Remove any existing animation and clear the animated class to prevent conflicts
-    elementToAnimate.style.removeProperty('animation');
-    if (!isUsingImgElement) {
-      current.classList.remove('animated');
-    }
-    
-    // CRITICAL: Reset any lingering animated state (opacity, transform) from previous photo
-    elementToAnimate.style.opacity = '1';
-    elementToAnimate.style.transform = '';
-    
-    // Clean up any previous Ken Burns CSS variables from previous photo
-    elementToAnimate.style.removeProperty('--start-scale');
-    elementToAnimate.style.removeProperty('--start-x'); 
-    elementToAnimate.style.removeProperty('--start-y');
-    
-    // Apply CSS variables for the starting transform values
-    elementToAnimate.style.setProperty('--start-scale', startScale.toString());
-    elementToAnimate.style.setProperty('--start-x', `${startTranslateX}%`);
-    elementToAnimate.style.setProperty('--start-y', `${startTranslateY}%`);
-    
-    // CRITICAL: Force animation restart by temporarily clearing and reapplying
-    elementToAnimate.style.animation = 'none';
-    elementToAnimate.offsetHeight; // Force reflow to ensure 'none' is applied
-    
-    // Now apply the animation - browser will see this as a new animation
-    elementToAnimate.style.animation = `ken-burns-static ${totalDuration}s linear forwards`;
-    current.style.overflow = 'hidden'; // Always apply overflow to container
-    
-    // Clean up CSS variables when animation ends, but keep animation visible
-    elementToAnimate.addEventListener('animationend', function cleanup() {
-      elementToAnimate.removeEventListener('animationend', cleanup);
-      // Only clean up the variables, not the animation or overflow (to prevent flash)
-      elementToAnimate.style.removeProperty('--start-scale');
-      elementToAnimate.style.removeProperty('--start-x'); 
-      elementToAnimate.style.removeProperty('--start-y');
-    });
-    
-    console.debug("[MMM-OneDrive] Ken Burns animation (CSS):", { 
-      method: isUsingImgElement ? "IMG element CSS" : "DIV background-image CSS",
-      animation: "ken-burns-static",
-      totalDuration: `${totalDuration}s`,
-      filename: target.filename,
-      hasFocalPoint: !!focalPoint,
-      startScale: startScale.toFixed(2),
-      translation: `${startTranslateX}%, ${startTranslateY}%`
-    });
-  },
-
-  applyCommonStyling: function(current: HTMLElement, target: OneDriveMediaItem, album: DriveItem, startDt: Date, kenBurnsActive?: boolean): void {
+  applyCommonStyling: function(current: HTMLElement, target: OneDriveMediaItem, album: DriveItem, startDt: Date, kenBurnsActive?: boolean, visionResults?: any): void {
     // ==================== END KEN BURNS EFFECT ==================== 
     
     // Only add animated class if Ken Burns is not active (to avoid animation conflicts)
@@ -697,33 +911,11 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       info.style.setProperty("--left", String(left));
       info.style.setProperty("--bottom", String(bottom));
       info.style.setProperty("--right", String(right));
+    } else {
+      info.style.setProperty("--bottom", "10px");
+      info.style.setProperty("--right", "10px");
     }
     info.innerHTML = "";
-    
-    // Detect if this photo is from a folder vs an album
-    const isFromFolder = target._folderId && !album.bundle;
-    
-    let sourceIcon, sourceTitle;
-    
-    if (isFromFolder) {
-      // Create folder icon instead of album cover
-      sourceIcon = document.createElement("div");
-      sourceIcon.classList.add("folderIcon");
-      sourceIcon.innerHTML = ""; // Empty - icon created with CSS
-      
-      sourceTitle = document.createElement("div");
-      sourceTitle.classList.add("folderTitle");
-      sourceTitle.innerHTML = album.name; // Folder name
-    } else {
-      // Create album cover (existing behavior)
-      sourceIcon = document.createElement("div");
-      sourceIcon.classList.add("albumCover");
-      sourceIcon.style.backgroundImage = `url(modules/MMM-OneDrive/cache/${album.id})`;
-      
-      sourceTitle = document.createElement("div");
-      sourceTitle.classList.add("albumTitle");
-      sourceTitle.innerHTML = album.name; // Album name
-    }
     
     const photoTime = document.createElement("div");
     photoTime.classList.add("photoTime");
@@ -752,11 +944,25 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       }
     }
     
+    // Apply new color theming: vibrant color for border/background, white text with bold date
+    if (visionResults?.colorAnalysis?.dominantColors?.length > 0) {
+      try {
+        const vibrantColor = this.getMostVibrantColor(visionResults.colorAnalysis.dominantColors);
+        this.applyPhotoInfoStyling(info, photoTime, photoLocation, vibrantColor);
+        
+      } catch (error) {
+        console.warn("[MMM-OneDrive] Failed to apply color theming:", error);
+        // Fallback to default styling
+        this.applyPhotoInfoStyling(info, photoTime, photoLocation);
+      }
+    } else {
+      // No color analysis available, use default theming
+      this.applyPhotoInfoStyling(info, photoTime, photoLocation);
+    }
+    
     const infoText = document.createElement("div");
     infoText.classList.add("infoText");
 
-    info.appendChild(sourceIcon);
-    infoText.appendChild(sourceTitle);
     infoText.appendChild(photoTime);
     if (photoLocation.innerHTML) {
       infoText.appendChild(photoLocation);
@@ -805,6 +1011,20 @@ const USE_WEB_ANIMATIONS_API = true; // Set to false to revert to CSS animations
       clearTimeout(this.displayTimer);
       this.displayTimer = null;
     }
+    
+    // Clean up blob URLs to free memory
+    if (this.currentBlobUrl) {
+      URL.revokeObjectURL(this.currentBlobUrl);
+      this.currentBlobUrl = null;
+      console.debug("[MMM-OneDrive] 🗑️ Main blob URL cleaned up during suspend");
+    }
+    
+    if (this.currentDebugBlobUrl) {
+      URL.revokeObjectURL(this.currentDebugBlobUrl);
+      this.currentDebugBlobUrl = null;
+      console.debug("[MMM-OneDrive] 🗑️ Debug blob URL cleaned up during suspend");
+    }
+    
     this.sendSocketNotification("MODULE_SUSPENDED", undefined);
     this.suspended = true;
     const info = document.getElementById("ONEDRIVE_PHOTO_INFO");

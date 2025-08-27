@@ -10,19 +10,75 @@ const path = require("path");
 const moment = require("moment");
 const { Readable } = require("stream");
 const { finished } = require("stream/promises");
+const { spawn } = require("child_process");
 const { RE2 } = require("re2-wasm");
 const NodeHelper = require("node_helper");
 const Log = require("logger");
 const crypto = require("crypto");
-const { getMatStats, logMatMemory } = require("./src/vision/matManager");
 
-// OpenCV Memory Debugging unified through matManager
+// Main process no longer imports OpenCV - all vision processing isolated in worker
 const OneDrivePhotos = require("./OneDrivePhotos.js");
 const { shuffle } = require("./shuffle.js");
 const { error_to_string } = require("./error_to_string.js");
 const { cachePath } = require("./msal/authConfig.js");
 const { convertHEIC } = require("./photosConverter-node");
 const { fetchToUint8Array, FetchHTTPError } = require("./fetchItem-node");
+const sharp = require('sharp');
+
+
+/**
+ * Create a center fallback focal point in pixel coordinates
+ * @param {Buffer} imageBuffer - Image buffer to get dimensions from
+ * @param {string} method - The fallback method/reason
+ * @returns {Promise<Object>} Fallback result with pixel coordinates
+ */
+async function createCenterFallback(imageBuffer, method) {
+  try {
+    // Get image dimensions using Sharp
+    const metadata = await sharp(imageBuffer).metadata();
+    const { width, height } = metadata;
+    
+    // Create center rectangle (50% of image centered)
+    const focalWidth = Math.round(width * 0.5);
+    const focalHeight = Math.round(height * 0.5);
+    const focalX = Math.round((width - focalWidth) / 2);
+    const focalY = Math.round((height - focalHeight) / 2);
+    
+    return {
+      focalPoint: {
+        x: focalX,
+        y: focalY,
+        width: focalWidth,
+        height: focalHeight,
+        type: 'center_fallback',
+        method: method
+      },
+      method: method
+    };
+  } catch (error) {
+    console.warn(`[NodeHelper] Could not get image dimensions for fallback, using default: ${error.message}`);
+    
+    // If we can't get dimensions, use reasonable defaults (assuming common photo size)
+    const defaultWidth = 1920;
+    const defaultHeight = 1080;
+    const focalWidth = Math.round(defaultWidth * 0.5);
+    const focalHeight = Math.round(defaultHeight * 0.5);
+    const focalX = Math.round((defaultWidth - focalWidth) / 2);
+    const focalY = Math.round((defaultHeight - focalHeight) / 2);
+    
+    return {
+      focalPoint: {
+        x: focalX,
+        y: focalY, 
+        width: focalWidth,
+        height: focalHeight,
+        type: 'center_fallback',
+        method: method
+      },
+      method: method
+    };
+  }
+}
 
 
 /**
@@ -86,39 +142,93 @@ const DEFAULT_SCAN_INTERVAL = 1000 * 60 * 55;
 const MINIMUM_SCAN_INTERVAL = 1000 * 60 * 10;
 
 /**
+ * Very carefully resize image to preserve exact format characteristics that OpenCV expects
+ * This matches the format from fetchToUint8Array as closely as possible
+ * @param {Buffer} imageBuffer - Original image buffer from fetchToUint8Array
+ * @param {Object} photo - Photo metadata for logging and updating
+ * @param {Object} config - Configuration with showWidth/showHeight
+ * @returns {Promise<Buffer>} Resized image buffer with same format characteristics
+ */
+async function resizeImageCarefully(imageBuffer, photo, config) {
+  try {
+    const { showWidth, showHeight } = config;
+    
+    // Get original metadata to preserve format exactly
+    const originalMetadata = await sharp(imageBuffer).metadata();
+    console.log(`[NodeHelper] 📐 Original ${photo.filename}: ${originalMetadata.width}x${originalMetadata.height} (${Math.round(imageBuffer.length / 1024)}KB)`);
+    console.log(`[NodeHelper] 🔍 Original format: ${originalMetadata.format}, channels: ${originalMetadata.channels}, density: ${originalMetadata.density}, space: ${originalMetadata.space}`);
+    
+    // Create Sharp instance with minimal processing to preserve original characteristics
+    let sharpInstance = sharp(imageBuffer, {
+      // Preserve original settings
+      density: originalMetadata.density,
+      // Don't modify color space unless necessary
+    })
+      .rotate() // Only do EXIF rotation - this is essential and works fine
+      .resize(showWidth, showHeight, {
+        fit: 'inside', // Maintain aspect ratio, fit within bounds
+        withoutEnlargement: true // Don't upscale small images
+      });
+    
+    // Preserve the EXACT original format and quality settings
+    let resized;
+    if (originalMetadata.format === 'jpeg') {
+      // For JPEG, try to match the original quality and characteristics exactly
+      resized = await sharpInstance
+        .jpeg({ 
+          quality: 95, // High quality to preserve vision processing accuracy
+          progressive: false, // Match typical camera output
+          chromaSubsampling: '4:2:0', // Standard JPEG subsampling
+          trellisQuantisation: false, // Don't over-optimize
+          overshootDeringing: false,
+          optimiseScans: false,
+          // Keep it as close to original as possible
+        })
+        .toBuffer();
+    } else if (originalMetadata.format === 'png') {
+      // For PNG, preserve exactly
+      resized = await sharpInstance
+        .png({ 
+          compressionLevel: 6,
+          progressive: false,
+          // Preserve alpha channel if present
+          adaptiveFiltering: false
+        })
+        .toBuffer();
+    } else {
+      // For other formats, convert to JPEG with high quality
+      console.log(`[NodeHelper] 📄 Converting ${originalMetadata.format} to JPEG for ${photo.filename}`);
+      resized = await sharpInstance
+        .jpeg({ 
+          quality: 95,
+          progressive: false,
+          chromaSubsampling: '4:2:0'
+        })
+        .toBuffer();
+    }
+    
+    const newMetadata = await sharp(resized).metadata();
+    console.log(`[NodeHelper] 📏 Resized ${photo.filename}: ${newMetadata.width}x${newMetadata.height} (${Math.round(resized.length / 1024)}KB)`);
+    console.log(`[NodeHelper] 🔍 Resized format: ${newMetadata.format}, channels: ${newMetadata.channels}, density: ${newMetadata.density}, space: ${newMetadata.space}`);
+    
+    // Update photo metadata with the actual resized dimensions
+    if (photo.mediaMetadata) {
+      photo.mediaMetadata.width = newMetadata.width;
+      photo.mediaMetadata.height = newMetadata.height;
+      console.log(`[NodeHelper] 📊 Updated metadata: ${photo.filename} dimensions to ${newMetadata.width}x${newMetadata.height}`);
+    }
+    
+    return resized;
+  } catch (error) {
+    console.error(`[NodeHelper] ❌ Failed to carefully resize ${photo.filename}:`, error.message);
+    throw error;
+  }
+}
+
+/**
  * @type {OneDrivePhotos}
  */
 let oneDrivePhotosInstance = null;
-
-// CRASH DETECTION AND LOGGING
-process.on('SIGABRT', (signal) => {
-  console.error(`[NodeHelper] 🚨 SIGABRT detected - likely native memory corruption from OpenCV`);
-  const matStats = getMatStats();
-  console.error(`[NodeHelper] Active Mat objects: ${matStats.active}, Total created: ${matStats.total}`);
-  console.error(`[NodeHelper] Memory usage:`, process.memoryUsage());
-  process.exit(1);
-});
-
-process.on('SIGSEGV', (signal) => {
-  console.error(`[NodeHelper] 🚨 SIGSEGV detected - segmentation fault, likely OpenCV Mat access`);
-  const matStats = getMatStats();
-  console.error(`[NodeHelper] Active Mat objects: ${matStats.active}, Total created: ${matStats.total}`);
-  process.exit(1);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error(`[NodeHelper] 🚨 Uncaught Exception:`, error);
-  console.error(`[NodeHelper] Stack:`, error.stack);
-  const matStats = getMatStats();
-  console.error(`[NodeHelper] Active Mat objects: ${matStats.active}, Total created: ${matStats.total}`);
-});
-
-// Check if garbage collection is available
-if (global.gc) {
-  console.log("[NodeHelper] ✅ Garbage collection available");
-} else {
-  console.log("[NodeHelper] ❌ Garbage collection NOT available - consider starting with --expose-gc");
-}
 
 const nodeHelperObject = {
   /** @type {OneDriveMediaItem[]} */
@@ -127,6 +237,10 @@ const nodeHelperObject = {
   localPhotoPntr: 0,
   uiRunner: null,
   moduleSuspended: false,
+  visionWorker: null,
+  visionWorkerReady: false,
+  visionRequestId: 0,
+  visionRequests: new Map(),
   start: function () {
     this.log_info("Starting module helper");
     this.config = {};
@@ -144,6 +258,10 @@ const nodeHelperObject = {
     this.CACHE_FOLDERS_PATH = path.resolve(this.path, "cache", "selectedFoldersCache.json");
     this.CACHE_PHOTOLIST_PATH = path.resolve(this.path, "cache", "photoListCache.json");
     this.CACHE_CONFIG = path.resolve(this.path, "cache", "config.json");
+    
+    // Initialize vision worker process
+    // this.initializeVisionWorker();
+    
     this.log_info("Started");
   },
 
@@ -181,194 +299,667 @@ const nodeHelperObject = {
     }
   },
 
-  performFaceDetection: async function(imageBuffer, filename) {
-    console.log(`[NodeHelper] � Face detection starting for: ${filename || 'unknown'}`);
-    logMatMemory("BEFORE face detection");
+  /**
+   * Parse and route vision worker log messages to appropriate console methods
+   * @param {string} logLine - Raw log line from vision worker
+   */
+  routeWorkerLogMessage: function(logLine) {
+    // Extract log level from worker message patterns
+    // Look for console.debug, console.log, console.warn, console.error patterns
     
-    try {
-      // Import the face detection module (dynamic import since it's optional)
-      const { faceDetector } = await import('./src/vision/faceDetection.js');
-      
-      // Track Mat objects before detection
-      const matStatsBefore = getMatStats();
-      
-      // Only detect faces - no focal point calculation, no debug drawing
-      const faces = await faceDetector.detectFacesOnly(imageBuffer);
-      
-      // Check for Mat object leaks
-      const matStatsAfter = getMatStats();
-      if (matStatsAfter.active > matStatsBefore.active) {
-        console.warn(`[NodeHelper] ⚠️ Potential Mat leak: ${matStatsBefore.active} -> ${matStatsAfter.active} active objects`);
+    // Handle stderr messages - these are usually errors or important warnings
+    if (logLine.includes('[STDERR]')) {
+      // Still check for debug patterns in stderr (some debugging might go to stderr)
+      if (logLine.includes('📊 Mat created') || 
+          logLine.includes('🗑️ Mat released') || 
+          logLine.includes('💾 Memory stats')) {
+        console.debug(`[Vision Worker] ${logLine}`);
+        return;
       }
+      // Most stderr messages should be errors or warnings
+      console.error(`[Vision Worker] ${logLine}`);
+      return;
+    }
+    
+    // Check WARNING and ERROR patterns FIRST (higher priority than debug)
+    
+    // Error level patterns (actual errors and failures)
+    if (logLine.includes('❌') || 
+        logLine.includes('ERROR') || 
+        logLine.includes('Error:') ||
+        logLine.includes('Failed to') ||
+        logLine.includes('Uncaught exception') ||
+        logLine.includes('Unhandled rejection') ||
+        logLine.includes('initialization failed') ||
+        logLine.includes('processing failed')) {
+      console.error(`[Vision Worker] ${logLine}`);
+      return;
+    }
+    
+    // Warning level patterns (important issues but not errors)
+    if (logLine.includes('⚠️') || 
+        logLine.includes('🚨') ||
+        logLine.includes('Warning:') ||
+        logLine.includes('WARN') ||
+        logLine.includes('Mat leak') ||
+        logLine.includes('Debug image creation failed')) {
+      console.warn(`[Vision Worker] ${logLine}`);
+      return;
+    }
+    
+    // Debug level patterns (most verbose processing details) - checked AFTER warnings/errors
+    if (logLine.includes('📊 Mat created') || 
+        logLine.includes('🗑️ Mat released') || 
+        logLine.includes('⏭️ Mat already released') || 
+        logLine.includes('💾 Memory stats') ||
+        logLine.includes('Creating YOLO blob') ||
+        logLine.includes('YOLO blob created successfully') ||
+        logLine.includes('Running YOLO inference') ||
+        logLine.includes('YOLO inference completed') ||
+        logLine.includes('YOLO found') ||
+        logLine.includes('Filtered out') ||
+        logLine.includes('Loading image from buffer') ||
+        logLine.includes('Converted serialized buffer') ||
+        logLine.includes('Received message:') ||
+        logLine.includes('🎯 Starting complete image processing') ||
+        logLine.includes('Face detection enabled:') ||
+        logLine.includes('🔄 Starting complete vision pipeline') ||
+        logLine.includes('Step 1: Attempting face detection') ||
+        logLine.includes('Face detection found') ||
+        logLine.includes('Step 2: Creating focal point') ||
+        logLine.includes('Face-based focal point created') ||
+        logLine.includes('Step 3: No faces found') ||
+        logLine.includes('Step 4: No focal point found') ||
+        logLine.includes('Interest-based focal point found') ||
+        logLine.includes('Creating debug image') ||
+        logLine.includes('Debug image created successfully') ||
+        logLine.includes('🧹 Emergency cleanup completed') ||
+        logLine.includes('[FaceDetector]') && (
+          logLine.includes('Creating') ||
+          logLine.includes('blob created') ||
+          logLine.includes('Running') ||
+          logLine.includes('inference completed') ||
+          logLine.includes('found') && logLine.includes('faces') ||
+          logLine.includes('Filtered') ||
+          logLine.includes('Loading image') ||
+          logLine.includes('already released')
+        ) ||
+        // MatManager debug messages (only those without warning/error symbols)
+        logLine.includes('[MatManager]') && (
+          logLine.includes('📊') ||
+          logLine.includes('🗑️') ||
+          logLine.includes('⏭️') ||
+          logLine.includes('💾') ||
+          logLine.includes('🧹')
+        ) ||
+        logLine.includes('[VisionWorker]') && (
+          logLine.includes('Received message') ||
+          logLine.includes('Starting complete') ||
+          logLine.includes('Face detection enabled') ||
+          logLine.includes('Starting complete vision') ||
+          logLine.includes('Step ') ||
+          logLine.includes('focal point') ||
+          logLine.includes('debug image')
+        )) {
+      console.debug(`[Vision Worker] ${logLine}`);
+      return;
+    }
+    
+    // Default to regular log for everything else (startup messages, results, etc.)
+    console.log(`[Vision Worker] ${logLine}`);
+  },
+
+  // ==================== VISION WORKER PROCESS MANAGEMENT ====================
+
+  initializeVisionWorker: function() {
+    console.log("[NodeHelper] Initializing vision worker process with reduced CPU priority...");
+    
+    const workerPath = path.join(__dirname, 'src/vision/vision-worker.js');
+    
+    // Use nice command to spawn the worker with lower CPU priority
+    // nice +10 = lower priority, giving UI thread higher priority for smooth animations
+    this.visionWorker = spawn('nice', [
+      '-n', '10',  // Set nice level to +10 (lower CPU priority)
+      'node',
+      '--max-old-space-size=512',  // 512MB memory limit for worker
+      workerPath
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc']
+    });
+
+    // Forward worker stdout to main process (for unified logging)
+    this.visionWorker.stdout.on('data', (data) => {
+      const lines = data.toString().trim().split('\n');
+      lines.forEach(line => {
+        if (line.trim()) {
+          this.routeWorkerLogMessage(line);
+        }
+      });
+    });
+
+    // Forward worker stderr to main process
+    this.visionWorker.stderr.on('data', (data) => {
+      const lines = data.toString().trim().split('\n');
+      lines.forEach(line => {
+        if (line.trim()) {
+          // Route stderr messages through the same smart routing
+          // but prefix them to indicate they came from stderr
+          this.routeWorkerLogMessage(`[STDERR] ${line}`);
+        }
+      });
+    });
+
+    // Handle IPC messages from worker
+    this.visionWorker.on('message', (message) => {
+      this.handleVisionWorkerMessage(message);
+    });
+
+    // Handle worker process exit
+    this.visionWorker.on('exit', (code, signal) => {
+      console.error(`[NodeHelper] Vision worker exited: code=${code}, signal=${signal}`);
+      this.visionWorkerReady = false;
       
-      logMatMemory("AFTER face detection");
-      console.log(`[NodeHelper] ✅ Face detection completed: found ${faces.length} faces`);
+      if (code !== 0 && !this.shuttingDown) {
+        console.log("[NodeHelper] Restarting vision worker in 3 seconds...");
+        setTimeout(() => {
+          this.initializeVisionWorker();
+        }, 3000);
+      }
+    });
+
+    // Handle worker process errors
+    this.visionWorker.on('error', (error) => {
+      console.error("[NodeHelper] Vision worker process error:", error.message);
+      this.visionWorkerReady = false;
+    });
+
+    console.log(`[NodeHelper] Vision worker process spawned with PID: ${this.visionWorker.pid} (nice +10 priority)`);
+    
+    // Set up periodic health check to detect dead workers
+    this.startVisionWorkerHealthCheck();
+  },
+
+  /**
+   * Start periodic health checking of the vision worker
+   */
+  startVisionWorkerHealthCheck: function() {
+    // Clear any existing health check
+    if (this.visionWorkerHealthCheckInterval) {
+      clearInterval(this.visionWorkerHealthCheckInterval);
+    }
+
+    console.log("Starting vision process health check");
+    
+    // Check worker health every 10 seconds
+    this.visionWorkerHealthCheckInterval = setInterval(() => {
+      if (!this.visionWorkerReady || !this.isVisionWorkerAlive()) {
+        console.warn("[NodeHelper] Vision worker health check failed - process is dead");
+        this.visionWorkerReady = false;
+        
+        // Clean up the dead worker reference
+        this.visionWorker = null;
+        
+        // Trigger restart
+        setTimeout(() => {
+          this.initializeVisionWorker();
+        }, 1000);
+      }
+    }, 10000); // Check every 10 seconds
+  },
+
+  /**
+   * Stop the vision worker health check
+   */
+  stopVisionWorkerHealthCheck: function() {
+    if (this.visionWorkerHealthCheckInterval) {
+      clearInterval(this.visionWorkerHealthCheckInterval);
+      this.visionWorkerHealthCheckInterval = null;
+    }
+    console.log("Stopping worker process health check");
+  },
+
+  handleVisionWorkerMessage: function(message) {
+    const { type, requestId } = message;
+    
+    switch (type) {
+      case 'WORKER_READY':
+        console.log("[NodeHelper] ✅ Vision worker ready");
+        this.visionWorkerReady = true;
+        break;
       
-      return faces; // Just return array of face objects: [{ x, y, width, height, confidence }]
+      case 'WORKER_ERROR':
+        console.error("[NodeHelper] Vision worker initialization failed:", message.error);
+        this.visionWorkerReady = false;
+        break;
       
-    } catch (error) {
-      console.error(`[NodeHelper] ❌ Face detection failed for ${filename || 'unknown'}:`, error.message);
-      console.error(`[NodeHelper] ❌ Face detection error stack:`, error.stack);
-      logMatMemory("AFTER face detection error");
-      this.log_debug("Face detection failed:", error.message);
-      return []; // Return empty array on failure
+      case 'WORKER_CRASH':
+        console.error("[NodeHelper] Vision worker crashed:", message.error);
+        if (message.stack) {
+          console.error("[NodeHelper] Crash stack:", message.stack);
+        }
+        this.visionWorkerReady = false;
+        break;
+      
+      case 'FACE_DETECTION_RESULT':
+      case 'FACE_DETECTION_ERROR':
+      case 'PROCESSING_RESULT':
+      case 'ERROR':
+        this.handleVisionWorkerResponse(message);
+        break;
+      
+      case 'HEALTH_CHECK_RESULT':
+      case 'STATS_RESULT':
+        this.handleVisionWorkerResponse(message);
+        break;
+      
+      default:
+        console.warn(`[NodeHelper] Unknown vision worker message type: ${type}`);
     }
   },
 
-  findInterestingRectangle: async function(imageBuffer, filename) {
-    console.log(`[NodeHelper] 🎯 Finding focal point for: ${filename || 'unknown'}`);
+  handleVisionWorkerResponse: function(message) {
+    const { requestId } = message;
     
-    // Check if face detection is disabled in config (defaults to enabled if not specified)
-    const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
-    console.log(`[NodeHelper] Face detection enabled: ${faceDetectionEnabled}`);
-    
-    if (!faceDetectionEnabled) {
-      console.log(`[NodeHelper] 🎬 Face detection disabled in config - using center focal point`);
-      return {
-        focalPoint: {
-          x: 0.25,        // 25% from left (start of center crop area)
-          y: 0.25,        // 25% from top (start of center crop area)  
-          width: 0.5,     // 50% width (center half of image)
-          height: 0.5,    // 50% height (center half of image)
-          type: 'center_fallback',
-          method: 'face_detection_disabled'
-        },
-        method: 'face_detection_disabled',
-        faces: []
-      };
-    }
-    
-    logMatMemory("BEFORE focal point analysis");
-    
-    try {
-      this.log_debug("Starting focal point analysis for:", filename);
+    if (this.visionRequests.has(requestId)) {
+      const { resolve, reject, timeout } = this.visionRequests.get(requestId);
       
-      // Step 1: Try face detection first
-      let faces = [];
-      try {
-        faces = await this.performFaceDetection(imageBuffer, filename);
-        this.log_debug(`Face detection found ${faces.length} faces for ${filename}`);
-      } catch (faceError) {
-        console.log(`[NodeHelper] Face detection failed:`, faceError.message);
-        this.log_debug("Face detection failed:", faceError.message);
-        // Continue with faces = [] (empty array)
+      // Clear timeout
+      if (timeout) {
+        clearTimeout(timeout);
       }
       
-      let focalPoint = null;
-      let method = 'none';
+      // Remove request from map
+      this.visionRequests.delete(requestId);
       
-      // Step 2: If faces found, create all-face bounding box
-      if (faces.length > 0) {
-        console.log(`[NodeHelper] Creating focal point from ${faces.length} face(s)`);
+      // Handle response
+      if (message.type.endsWith('_ERROR')) {
+        const error = new Error(message.error);
+        error.stack = message.stack;
+        reject(error);
+      } else {
+        resolve(message);
+      }
+    } else {
+      console.warn(`[NodeHelper] Received response for unknown request ID: ${requestId}`);
+    }
+  },
+
+  /**
+   * Check if the vision worker process is actually alive
+   * @returns {boolean} True if worker process is running
+   */
+  isVisionWorkerAlive: function() {
+    if (!this.visionWorker || !this.visionWorker.pid) {
+      return false;
+    }
+    
+    try {
+      // Use kill(0) to test if process exists without actually sending a signal
+      process.kill(this.visionWorker.pid, 0);
+      return true;
+    } catch (error) {
+      // ESRCH error means process doesn't exist
+      if (error.code === 'ESRCH') {
+        console.warn(`[NodeHelper] Vision worker PID ${this.visionWorker.pid} no longer exists`);
+        this.visionWorkerReady = false;
+        return false;
+      }
+      // Other errors (like EPERM) mean process exists but we can't signal it
+      return true;
+    }
+  },
+
+  sendVisionWorkerMessage: function(message, timeoutMs = 30000) {
+    return new Promise((resolve, reject) => {
+      // Check both the ready flag AND that the process is actually alive
+      if (!this.visionWorker || !this.visionWorkerReady || !this.isVisionWorkerAlive()) {
+        // // If worker is dead but we didn't know it, trigger restart
+        // if (this.visionWorker && !this.isVisionWorkerAlive()) {
+        //   console.warn("[NodeHelper] Dead vision worker detected, triggering restart...");
+        //   this.visionWorkerReady = false;
+        //   setTimeout(() => {
+        //     this.initializeVisionWorker();
+        //   }, 1000); // Shorter delay since we detected it's already dead
+        // }
         
-        // Find bounding box that contains all faces
+        reject(new Error('Vision worker not available'));
+        return;
+      }
+      
+      const requestId = ++this.visionRequestId;
+      message.requestId = requestId;
+      
+      // Set up timeout
+      const timeout = setTimeout(() => {
+        this.visionRequests.delete(requestId);
+        reject(new Error(`Vision worker timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+      
+      // Store request
+      this.visionRequests.set(requestId, { resolve, reject, timeout });
+      
+      // Send message to worker
+      this.visionWorker.send(message);
+    });
+  },
+
+  shutdownVisionWorker: function() {
+    if (this.visionWorker) {
+      console.log("[NodeHelper] Shutting down vision worker...");
+      this.shuttingDown = true;
+      
+      // Stop health checking
+      this.stopVisionWorkerHealthCheck();
+      
+      try {
+        this.visionWorker.send({ type: 'SHUTDOWN' });
+      } catch (error) {
+        console.warn("[NodeHelper] Could not send shutdown message to vision worker:", error.message);
+      }
+      
+      setTimeout(() => {
+        if (this.visionWorker && !this.visionWorker.killed) {
+          console.log("[NodeHelper] Force killing vision worker...");
+          this.visionWorker.kill('SIGTERM');
+        }
+      }, 5000);
+    }
+  },
+
+  // ==================== END VISION WORKER MANAGEMENT ====================
+
+  /**
+   * Choose the best focal point from face detection and interest region results
+   * This implements the decision-making logic that was previously in the worker
+   */
+  chooseFocalPointFromDetections: async function(detectionResults, imageBuffer, filename) {
+    const { faces, interestRegions, colorAnalysis, debugImageBuffer } = detectionResults;
+    
+    console.log(`[NodeHelper] 🎯 Choosing focal point from ${faces.length} faces and ${interestRegions.length} interest regions`);
+    
+    // Priority 1: Use faces if available - construct all-faces bounding box
+    if (faces && faces.length > 0) {
+      console.log(`[NodeHelper] 📍 Using face detection (${faces.length} faces found)`);
+      
+      // Sort faces by confidence for logging
+      const sortedFaces = faces.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+      const bestFace = sortedFaces[0];
+      
+      let focalPoint;
+      
+      if (faces.length === 1) {
+        // Single face - use the face rectangle directly
+        focalPoint = {
+          x: bestFace.x,
+          y: bestFace.y,
+          width: bestFace.width,
+          height: bestFace.height,
+          type: 'face',
+          method: 'single_face_detection',
+          confidence: bestFace.confidence
+        };
+        
+        console.log(`[NodeHelper] Selected single face: confidence=${bestFace.confidence?.toFixed(3) || 'unknown'}, ` +
+                   `rect=[${bestFace.x?.toFixed(3)}, ${bestFace.y?.toFixed(3)}, ${bestFace.width?.toFixed(3)}, ${bestFace.height?.toFixed(3)}]`);
+      } else {
+        // Multiple faces - create bounding box that contains all faces
         const minX = Math.min(...faces.map(f => f.x));
         const minY = Math.min(...faces.map(f => f.y));
         const maxX = Math.max(...faces.map(f => f.x + f.width));
         const maxY = Math.max(...faces.map(f => f.y + f.height));
         
-        // Add some padding around the faces
-        const padding = 0.0; // try no padding
-        const width = maxX - minX;
-        const height = maxY - minY;
-        const paddingX = width * padding;
-        const paddingY = height * padding;
-        
         focalPoint = {
-          x: Math.max(0, minX - paddingX),
-          y: Math.max(0, minY - paddingY), 
-          width: width + (paddingX * 2),
-          height: height + (paddingY * 2),
+          x: minX,
+          y: minY,
+          width: maxX - minX,
+          height: maxY - minY,
           type: 'face',
-          method: 'all_faces_bounding_box'
+          method: 'multi_face_detection',
+          confidence: bestFace.confidence // Use best face confidence
         };
-        method = 'faces';
-        console.log(`[NodeHelper] Face-based focal point created for ${faces.length} faces`);
-      }
-      
-      // Step 3: If no faces, try interest detection
-      if (!focalPoint) {
-        console.log(`[NodeHelper] No faces found, trying interest detection...`);
-        const matStatsBeforeInterest = getMatStats();
         
-        try {
-          // Import and use InterestDetector directly
-          const InterestDetector = require('./src/vision/interestDetection.js');
-          const interestDetector = new InterestDetector({
-            sizeMode: 'adaptive',
-            minConfidenceThreshold: 0.65,
-            minScoreThreshold: 30,
-            enableDebugLogs: false
-          });
-          
-          const interestResult = await interestDetector.detectInterestRegions(imageBuffer);
-          if (interestResult && interestResult.focalPoint) {
-            focalPoint = interestResult.focalPoint;
-            method = 'interest';
-            console.log(`[NodeHelper] Interest-based focal point found`);
-          }
-          
-          // Check for Mat leaks in interest detection
-          const matStatsAfterInterest = getMatStats();
-          if (matStatsAfterInterest.active > matStatsBeforeInterest.active) {
-            console.warn(`[NodeHelper] ⚠️ Interest detection Mat leak: ${matStatsBeforeInterest.active} -> ${matStatsAfterInterest.active} active objects`);
-          }
-          
-        } catch (interestError) {
-          console.error(`[NodeHelper] Interest detection failed:`, interestError.message);
-          console.error(`[NodeHelper] Interest detection error stack:`, interestError.stack);
-          this.log_debug("Interest detection failed:", interestError.message);
-        }
+        console.log(`[NodeHelper] Created all-faces bounding box for ${faces.length} faces: ` +
+                   `rect=[${minX.toFixed(3)}, ${minY.toFixed(3)}, ${(maxX - minX).toFixed(3)}, ${(maxY - minY).toFixed(3)}]`);
       }
       
-      // Step 4: Default fallback - center crop
-      if (!focalPoint) {
-        console.log(`[NodeHelper] No focal point found, using default center`);
-        focalPoint = {
-          x: 0.25,
-          y: 0.25,
-          width: 0.5,
-          height: 0.5,
-          type: 'default',
-          method: 'center_fallback'
-        };
-        method = 'default';
-      }
-      
-      logMatMemory("AFTER focal point analysis");
-      console.log(`[NodeHelper] ✅ findInterestingRectangle completed: method=${method}`);
-      this.log_debug(`Focal point analysis completed for ${filename}:`, {
-        method: method,
-        faceCount: faces.length
-      });
-      
       return {
-        focalPoint,
-        method,
-        faces
-      };
-      
-    } catch (error) {
-      console.error(`[NodeHelper] ❌ findInterestingRectangle failed for ${filename || 'unknown'}:`, error.message);
-      console.error(`[NodeHelper] Error stack:`, error.stack);
-      logMatMemory("AFTER focal point error");
-      this.log_debug("Focal point analysis failed, using fallback:", error.message);
-      
-      // Return default fallback on any error
-      return {
-        focalPoint: {
-          x: 0.25,
-          y: 0.25,
-          width: 0.5,
-          height: 0.5,
-          type: 'default',
-          method: 'error_fallback'
-        },
-        method: 'error_fallback',
-        faces: []
+        focalPoint: focalPoint,
+        method: focalPoint.method,
+        colorAnalysis: colorAnalysis,
+        debugImageBuffer: debugImageBuffer // Binary buffer instead of base64
       };
     }
+    
+    // Priority 2: Use interest regions if no faces found
+    if (interestRegions && interestRegions.length > 0) {
+      console.log(`[NodeHelper] 📍 No faces found, using interest detection (${interestRegions.length} regions found)`);
+      
+      // Use the highest confidence interest region
+      const bestInterest = interestRegions[0]; // Already sorted by confidence in worker
+      
+      console.log(`[NodeHelper] Selected best interest region: confidence=${bestInterest.confidence?.toFixed(3) || 'unknown'}, ` +
+                 `rect=[${bestInterest.x?.toFixed(3)}, ${bestInterest.y?.toFixed(3)}, ${bestInterest.width?.toFixed(3)}, ${bestInterest.height?.toFixed(3)}]`);
+      
+      return {
+        focalPoint: {
+          x: bestInterest.x,
+          y: bestInterest.y,
+          width: bestInterest.width,
+          height: bestInterest.height,
+          type: 'interest',
+          method: 'interest_detection',
+          confidence: bestInterest.confidence
+        },
+        method: 'interest_detection',
+        colorAnalysis: colorAnalysis,
+        debugImageBuffer: debugImageBuffer // Binary buffer instead of base64
+      };
+    }
+    
+    // Priority 3: No detections found - use center fallback via createCenterFallback function
+    console.log(`[NodeHelper] 📍 No faces or interest regions found, using center fallback`);
+    
+    const centerFallback = await createCenterFallback(imageBuffer, 'no_detections_found');
+    
+    return {
+      focalPoint: centerFallback.focalPoint,
+      method: centerFallback.method,
+      colorAnalysis: colorAnalysis,
+      debugImageBuffer: debugImageBuffer // Binary buffer instead of base64
+    };
   },
+
+  findInterestingRectangle: async function(imageBuffer, filename) {
+    console.log(`[NodeHelper] 🎯 Finding focal point for: ${filename || 'unknown'}`);
+    
+    // First, check if we have cached vision results for this photo
+    const photo = this.localPhotoList.find(p => p.filename === filename);
+    if (photo && photo._visionResults) {
+      console.log(`[NodeHelper] 💾 Found cached vision results for: ${filename}`);
+      console.log(`[NodeHelper] 💾 Cache info: faces=${photo._visionResults.faces?.length || 0}, interests=${photo._visionResults.interestRegions?.length || 0}, colors=${photo._visionResults.colorAnalysis?.dominantColors?.length || 0}, error=${photo._visionResults.error}, shouldRetry=${photo._visionResults.shouldRetry}`);
+      
+      // Check if cached result was an error - if so, retry the analysis
+      if (photo._visionResults.error && photo._visionResults.shouldRetry) {
+        console.log(`[NodeHelper] 🔄 Cached result was an error with retry flag, attempting analysis again`);
+        // Continue to vision processing below
+      } else if (photo._visionResults.error && !photo._visionResults.shouldRetry) {
+        console.log(`[NodeHelper] ❌ Using cached permanent error result`);
+        // Use cached error result (don't retry permanent errors)
+        return await createCenterFallback(imageBuffer, photo._visionResults.errorReason || 'cached_error');
+      } else {
+        console.log(`[NodeHelper] ✅ Using cached vision detection results - recomputing focal point selection`);
+        // Use cached raw detection results but recompute focal point selection
+        const cachedDetectionResult = {
+          faces: photo._visionResults.faces || [],
+          interestRegions: photo._visionResults.interestRegions || [],
+          colorAnalysis: photo._visionResults.colorAnalysis || null,
+          debugImageBuffer: photo._visionResults.debugImageBuffer // Binary buffer instead of base64
+        };
+        
+        // Recompute focal point decision from cached detections
+        const focalPointResult = await this.chooseFocalPointFromDetections(cachedDetectionResult, imageBuffer, filename);
+        
+        return {
+          focalPoint: focalPointResult.focalPoint,
+          method: focalPointResult.method,
+          colorAnalysis: focalPointResult.colorAnalysis,
+          debugImageBuffer: focalPointResult.debugImageBuffer, // Binary buffer instead of base64
+          cached: true
+        };
+      }
+    } else {
+      console.log(`[NodeHelper] 🆕 No cached vision results found, performing fresh analysis`);
+    }
+    
+    let visionResult = null;
+    
+    try {
+      // Check if face detection is disabled in config (defaults to enabled if not specified)
+      const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
+      console.log(`[NodeHelper] Face detection enabled: ${faceDetectionEnabled}`);
+      
+      // Use vision worker for complete image processing
+      if (this.visionWorkerReady) {
+        console.log(`[NodeHelper] Using vision worker for complete image processing...`);
+        
+        const response = await this.sendVisionWorkerMessage({
+          type: 'PROCESS_IMAGE',
+          imageBuffer: imageBuffer,
+          filename: filename,
+          config: {
+            faceDetection: { enabled: faceDetectionEnabled },
+            debugMode: this.config?.faceDetection?.debugMode || false
+          }
+        });
+        
+        if (response.type === 'PROCESSING_RESULT') {
+          const { result, processingTime } = response;
+          
+          // Convert debugImageBuffer from Array back to Buffer (IPC serialization workaround)
+          if (result.debugImageBuffer && Array.isArray(result.debugImageBuffer)) {
+            result.debugImageBuffer = Buffer.from(result.debugImageBuffer);
+            console.debug(`[NodeHelper] Converted debug image from Array back to Buffer: ${result.debugImageBuffer.length} bytes`);
+          }
+          
+          // Check if worker returned an error
+          if (result.error) {
+            console.log(`[NodeHelper] ⚠️ Vision worker returned error: ${result.error}`);
+            console.log(`[NodeHelper] Using center fallback instead`);
+            
+            visionResult = await createCenterFallback(imageBuffer, 'worker_error');
+            
+            // Cache this error result but mark for retry (transient error)
+            if (photo) {
+              photo._visionResults = {
+                // No detection data for error cases
+                faces: [],
+                interestRegions: [],
+                debugImageBuffer: null, // Binary buffer instead of base64
+                
+                // Error metadata
+                error: true,
+                shouldRetry: true, // Worker errors might be transient
+                errorReason: 'worker_error',
+                errorMessage: result.error,
+                timestamp: Date.now()
+              };
+              console.log(`[NodeHelper] 💾 Caching worker error result (will retry): ${result.error}`);
+              // Save updated photo list to persist cache
+              this.savePhotoListCache();
+            }
+            
+            return visionResult;
+          }
+          
+          console.log(`[NodeHelper] ✅ Vision worker completed in ${processingTime}ms`);
+          console.log(`[NodeHelper] Detection results: ${result.faces.length} faces, ${result.interestRegions.length} interest regions`);
+          
+          // Make focal point decision from the detection results
+          visionResult = await this.chooseFocalPointFromDetections(result, imageBuffer, filename);
+          console.log(`[NodeHelper] Final focal point decision: method=${visionResult.method}`);
+          
+          // Cache raw detection results (not the final focal point decision)
+          if (photo) {
+            photo._visionResults = {
+              // Store raw detection data
+              faces: result.faces || [],
+              interestRegions: result.interestRegions || [],
+              colorAnalysis: result.colorAnalysis || null,
+              debugImageBuffer: result.debugImageBuffer, // Binary buffer instead of base64
+              
+              // Metadata
+              error: false,
+              shouldRetry: false,
+              analysisComplete: true,
+              timestamp: Date.now(),
+              processingTime: processingTime
+            };
+            console.log(`[NodeHelper] 💾 Caching raw vision detection results: ${result.faces.length} faces, ${result.interestRegions.length} interests, colors: ${result.colorAnalysis?.dominantColors?.length || 0}`);
+            // Save updated photo list to persist cache
+            this.savePhotoListCache();
+          }
+          
+          return visionResult;
+        } else {
+          throw new Error(`Unexpected vision worker response: ${response.type}`);
+        }
+      } else {
+        console.warn("[NodeHelper] Vision worker not ready, using fallback processing...");
+        visionResult = await createCenterFallback(imageBuffer, 'worker_not_ready');
+        
+        // Cache this fallback result but mark for retry (worker might come online later)
+        if (photo) {
+          photo._visionResults = {
+            // No detection data for error cases
+            faces: [],
+            interestRegions: [],
+            debugImageBuffer: null, // Binary buffer instead of base64
+            
+            // Error metadata
+            error: true,
+            shouldRetry: true, // Worker not ready is transient
+            errorReason: 'worker_not_ready',
+            timestamp: Date.now()
+          };
+          console.log(`[NodeHelper] 💾 Caching worker-not-ready result (will retry)`);
+          // Save updated photo list to persist cache
+          this.savePhotoListCache();
+        }
+        
+        return visionResult;
+      }
+      
+    } catch (error) {
+      console.error(`[NodeHelper] ❌ Vision processing failed for ${filename || 'unknown'}:`, error.message);
+      console.log(`[NodeHelper] Using center fallback due to error`);
+      
+      // Return center fallback on any error
+      visionResult = await createCenterFallback(imageBuffer, 'error_fallback');
+      
+      // Cache this error result but mark for retry (errors might be transient)
+      if (photo) {
+        photo._visionResults = {
+          // No detection data for error cases
+          faces: [],
+          interestRegions: [],
+          debugImageBuffer: null, // Binary buffer instead of base64
+          
+          // Error metadata
+          error: true,
+          shouldRetry: true, // Processing errors might be transient
+          errorReason: 'processing_error',
+          errorMessage: error.message,
+          timestamp: Date.now()
+        };
+        console.log(`[NodeHelper] 💾 Caching processing error result (will retry): ${error.message}`);
+        // Save updated photo list to persist cache
+        this.savePhotoListCache();
+      }
+      
+      return visionResult;
+    }
+  },
+
 
   log_debug: function (...args) {
     Log.debug(`[${this.name}] [node_helper]`, ...args);
@@ -394,6 +985,9 @@ const nodeHelperObject = {
     }
     if (this.config.scanInterval < MINIMUM_SCAN_INTERVAL) {
       this.config.scanInterval = MINIMUM_SCAN_INTERVAL;
+    }
+    if (this.config.kenBurnsEffect) {
+      this.initializeVisionWorker();
     }
     oneDrivePhotosInstance = new OneDrivePhotos({
       debug: this.debug,
@@ -539,6 +1133,15 @@ const nodeHelperObject = {
           }
           this.localPhotoList = [...cachedPhotoList].map((photo, index) => {
             photo._indexOfPhotos = index;
+            
+            // Convert base64 debug images back to binary buffers when loading from cache
+            if (photo._visionResults && photo._visionResults.debugImageBase64) {
+              photo._visionResults.debugImageBuffer = Buffer.from(photo._visionResults.debugImageBase64, 'base64');
+              // Remove the base64 version to save memory
+              delete photo._visionResults.debugImageBase64;
+              console.debug(`[NodeHelper] Converted cached debug image from base64 to buffer for ${photo.filename}`);
+            }
+            
             return photo;
           });
           this.log_info("successfully loaded photo list cache of ", this.localPhotoList.length, " photos");
@@ -596,9 +1199,7 @@ const nodeHelperObject = {
 
   processNextPhotoRequest: async function() {
     const startTime = Date.now();
-    const memBefore = process.memoryUsage();
-    console.log(`[NodeHelper] 🔄 Processing photo request... (Memory: ${Math.round(memBefore.heapUsed / 1024 / 1024)}MB heap, ${Math.round(memBefore.rss / 1024 / 1024)}MB RSS)`);
-    logMatMemory("BEFORE photo processing");
+    console.log(`[NodeHelper] 🔄 Processing photo request... `);
     
     if (!this.localPhotoList || this.localPhotoList.length === 0) {
       console.warn("[NodeHelper] ⚠ No photos available in list");
@@ -613,31 +1214,7 @@ const nodeHelperObject = {
     try {
       await this.prepareShowPhoto({ photoId: photo.id });
 
-      // MEMORY MONITORING
-      const memAfter = process.memoryUsage();
-      const memDelta = memAfter.heapUsed - memBefore.heapUsed;
-      console.log(`[NodeHelper] 💾 Memory after processing: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB heap (${memDelta > 0 ? '+' : ''}${Math.round(memDelta / 1024 / 1024)}MB), RSS: ${Math.round(memAfter.rss / 1024 / 1024)}MB`);
-      
-      // CRASH PREVENTION - restart if memory too high
-      if (memAfter.heapUsed > 1000 * 1024 * 1024) { // 1GB threshold
-        console.error(`[NodeHelper] 🚨 Memory limit exceeded (${Math.round(memAfter.heapUsed / 1024 / 1024)}MB) - requesting restart to prevent crash`);
-        this.sendSocketNotification("ERROR", "Memory limit exceeded - please restart MagicMirror");
-        process.exit(1); // Force clean restart
-      }
-
-      // FORCE GARBAGE COLLECTION after each photo
-      if (global.gc) {
-        global.gc();
-        global.gc(); // Double GC for more thorough cleanup
-        console.log("[NodeHelper] 🗑️ Double garbage collection forced");
-      } else {
-        // Alternative: Force memory pressure to trigger GC
-        const dummy = new Array(1000000).fill(0); // Create pressure
-        dummy.length = 0; // Clear immediately
-        console.log("[NodeHelper] 🗑️ Memory pressure applied to trigger GC");
-      }
-      
-      logMatMemory("AFTER photo processing & GC");
+      console.log("[NodeHelper] ✅ Photo processed successfully");
     
       // Advance to next photo for future requests
       this.uiPhotoIndex++;
@@ -652,7 +1229,6 @@ const nodeHelperObject = {
     } catch (error) {
       console.error("[NodeHelper] ❌ Error processing photo:", error);
       console.error("[NodeHelper] ❌ Stack trace:", error.stack);
-      logMatMemory("AFTER error in photo processing");
       this.sendSocketNotification("NO_PHOTO");
     }
   },
@@ -871,9 +1447,6 @@ const nodeHelperObject = {
 
   prepareShowPhoto: async function ({ photoId }) {
 
-    // Log memory usage before processing
-    const memBefore = process.memoryUsage();
-    
     const photo = this.localPhotoList.find((p) => p.id === photoId);
     if (!photo) {
       this.log_error(`Photo with id ${photoId} not found in local list`);
@@ -931,50 +1504,56 @@ const nodeHelperObject = {
         }
       }
 
+      // Carefully resize image based on showWidth/showHeight config (preserving format exactly)
+      if (buffer && (this.config.showWidth || this.config.showHeight)) {
+        console.log(`[NodeHelper] 📏 Resizing ${photo.filename} from full resolution to fit ${this.config.showWidth}x${this.config.showHeight}`);
+        try {
+          const resizedBuffer = await resizeImageCarefully(buffer, photo, this.config);
+          buffer = resizedBuffer;
+          console.log(`[NodeHelper] ✅ Image resized to ${buffer.length} bytes`);
+        } catch (resizeError) {
+          console.warn(`[NodeHelper] ⚠️ Failed to resize image, using original:`, resizeError.message);
+          // Continue with original buffer if resize fails
+        }
+      }
+
       const album = this.selectedAlbums.find((a) => a.id === photo._albumId);
       const folder = this.selectedFolders.find((f) => f.id === photo._folderId);
       
       // Determine the source (album or folder) for display
       const source = album || folder;
 
-      const base64 = buffer.toString("base64");
-      const dataUrl = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${base64}`;
+      // Skip base64 encoding - send raw buffer to frontend
+      // const base64 = buffer.toString("base64");
+      // const dataUrl = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${base64}`;
 
       // Find interesting rectangle for Ken Burns effect (handles faces, interest detection, fallbacks)
       let interestingRectangleResult = null;
       if (this.config.kenBurnsEffect !== false && photo.filename) {
         interestingRectangleResult = await this.findInterestingRectangle(buffer, photo.filename);
         
-        // Generate debug image if requested (using all rectangle information)
-        if (this.config?.faceDetection?.debugMode && interestingRectangleResult) {
-          try {
-            console.log(`[NodeHelper] Creating debug image for ${photo.filename} (${interestingRectangleResult.faces.length} faces)`);
-            
-            const { debugImageCreator } = await import('./src/vision/debugUtils.js');
-            const debugResult = await debugImageCreator.createDebugImage(
-              buffer, 
-              interestingRectangleResult.faces, 
-              interestingRectangleResult.focalPoint
-            );
-            
-            if (debugResult && debugResult.markedImageBuffer) {
-              const markedImageBase64 = debugResult.markedImageBuffer.toString('base64');
-              interestingRectangleResult.markedImageUrl = `data:image/jpeg;base64,${markedImageBase64}`;
-              console.log(`[NodeHelper] Debug image created successfully`);
-              this.log_debug(`Debug image created for ${photo.filename}`);
-            }
-          } catch (debugError) {
-            console.log(`[NodeHelper] ⚠️  Debug image creation failed:`, debugError.message);
-            this.log_debug("Debug image creation failed:", debugError.message);
-            interestingRectangleResult.markedImageUrl = null;
-          }
+        // Debug image is now created by vision worker as binary buffer (if debugMode enabled)
+        if (this.config?.faceDetection?.debugMode && interestingRectangleResult?.debugImageBuffer) {
+          // Store the binary buffer for frontend to convert to blob URL
+          console.log(`[NodeHelper] Debug image received from vision worker for ${photo.filename} (${interestingRectangleResult.debugImageBuffer.length} bytes)`);
+          this.log_debug(`Debug image received for ${photo.filename} (binary buffer)`);
         }
       }
 
-      console.log(`[NodeHelper] 📤 Sending photo to frontend: ${photo.filename}`);
+      console.log(`[NodeHelper] 📤 Sending photo to frontend: ${photo.filename} (${buffer.length} bytes, ${photo.mimeType})`);
+      console.debug(`[NodeHelper] Photo payload debug:`, {
+        hasPhotoBuffer: !!buffer,
+        photoBufferSize: buffer.length,
+        hasInterestingRectangleResult: !!interestingRectangleResult,
+        hasDebugImageBuffer: !!interestingRectangleResult?.debugImageBuffer,
+        debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0,
+        interestingRectangleMethod: interestingRectangleResult?.method || 'none'
+      });
+      
       this.log_debug("Image send to UI:", { id: photo.id, filename: photo.filename, index: photo._indexOfPhotos });
       this.sendSocketNotification("RENDER_PHOTO", { 
-        photoBase64: base64, 
+        photoBuffer: buffer, // Send raw binary buffer instead of base64
+        mimeType: photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType, // Store mime type separately
         photo, 
         album: source, 
         info: null, 
@@ -988,10 +1567,6 @@ const nodeHelperObject = {
         interestingRectangleResult.markedImageBuffer = null;
       }
       
-      // Log memory usage after processing
-      const memAfter = process.memoryUsage();
-      console.log(`[NodeHelper] 💾 Memory after photo processing: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB heap (+${Math.round((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024)}MB)`);
-
     } catch (err) {
       this.sendSocketNotification("NO_PHOTO");  // prime the pump for the UX asking again
       if (err instanceof FetchHTTPError) {
@@ -1012,11 +1587,31 @@ const nodeHelperObject = {
   stop: function () {
     this.log_info("Stopping module helper");
     clearInterval(this.scanTimer);
+    
+    // Shutdown vision worker process
+    this.shutdownVisionWorker();
   },
 
   savePhotoListCache: function () {
     (async () => {
-      await this.writeFileSafe(this.CACHE_PHOTOLIST_PATH, JSON.stringify(this.localPhotoList, null, 4), "Photo list cache");
+      // Create a copy of localPhotoList with debug image buffers converted to base64 for serialization
+      const serializablePhotoList = this.localPhotoList.map(photo => {
+        if (photo._visionResults && photo._visionResults.debugImageBuffer) {
+          // Convert binary debug image buffer to base64 for JSON serialization
+          const debugImageBase64 = photo._visionResults.debugImageBuffer.toString('base64');
+          const { debugImageBuffer, ...visionResultsWithoutBuffer } = photo._visionResults;
+          return {
+            ...photo,
+            _visionResults: {
+              ...visionResultsWithoutBuffer,
+              debugImageBase64: debugImageBase64 // Store as base64 in cache
+            }
+          };
+        }
+        return photo;
+      });
+      
+      await this.writeFileSafe(this.CACHE_PHOTOLIST_PATH, JSON.stringify(serializablePhotoList, null, 4), "Photo list cache");
       await this.saveCacheConfig("CACHE_PHOTOLIST_PATH", new Date().toISOString());
     })();
   },
