@@ -1563,7 +1563,7 @@ const nodeHelperObject = {
       }
 
       // Carefully resize image based on showWidth/showHeight config (preserving format exactly)
-      if (buffer && (this.config.showWidth || this.config.showHeight)) {
+      if (false && buffer && (this.config.showWidth || this.config.showHeight)) {
         console.log(`[NodeHelper] 📏 Resizing ${photo.filename} from full resolution to fit ${this.config.showWidth}x${this.config.showHeight}`);
         logMemoryUsage(`before resizing ${photo.filename}`);
         try {
