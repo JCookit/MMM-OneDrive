@@ -142,6 +142,90 @@ const DEFAULT_SCAN_INTERVAL = 1000 * 60 * 55;
 const MINIMUM_SCAN_INTERVAL = 1000 * 60 * 10;
 
 /**
+ * Very carefully resize image to preserve exact format characteristics that OpenCV expects
+ * This matches the format from fetchToUint8Array as closely as possible
+ * @param {Buffer} imageBuffer - Original image buffer from fetchToUint8Array
+ * @param {Object} photo - Photo metadata for logging and updating
+ * @param {Object} config - Configuration with showWidth/showHeight
+ * @returns {Promise<Buffer>} Resized image buffer with same format characteristics
+ */
+async function resizeImageCarefully(imageBuffer, photo, config) {
+  try {
+    const { showWidth, showHeight } = config;
+    
+    // Get original metadata to preserve format exactly
+    const originalMetadata = await sharp(imageBuffer).metadata();
+    console.log(`[NodeHelper] 📐 Original ${photo.filename}: ${originalMetadata.width}x${originalMetadata.height} (${Math.round(imageBuffer.length / 1024)}KB)`);
+    console.log(`[NodeHelper] 🔍 Original format: ${originalMetadata.format}, channels: ${originalMetadata.channels}, density: ${originalMetadata.density}, space: ${originalMetadata.space}`);
+    
+    // Create Sharp instance with minimal processing to preserve original characteristics
+    let sharpInstance = sharp(imageBuffer, {
+      // Preserve original settings
+      density: originalMetadata.density,
+      // Don't modify color space unless necessary
+    })
+      .rotate() // Only do EXIF rotation - this is essential and works fine
+      .resize(showWidth, showHeight, {
+        fit: 'inside', // Maintain aspect ratio, fit within bounds
+        withoutEnlargement: true // Don't upscale small images
+      });
+    
+    // Preserve the EXACT original format and quality settings
+    let resized;
+    if (originalMetadata.format === 'jpeg') {
+      // For JPEG, try to match the original quality and characteristics exactly
+      resized = await sharpInstance
+        .jpeg({ 
+          quality: 95, // High quality to preserve vision processing accuracy
+          progressive: false, // Match typical camera output
+          chromaSubsampling: '4:2:0', // Standard JPEG subsampling
+          trellisQuantisation: false, // Don't over-optimize
+          overshootDeringing: false,
+          optimiseScans: false,
+          // Keep it as close to original as possible
+        })
+        .toBuffer();
+    } else if (originalMetadata.format === 'png') {
+      // For PNG, preserve exactly
+      resized = await sharpInstance
+        .png({ 
+          compressionLevel: 6,
+          progressive: false,
+          // Preserve alpha channel if present
+          adaptiveFiltering: false
+        })
+        .toBuffer();
+    } else {
+      // For other formats, convert to JPEG with high quality
+      console.log(`[NodeHelper] 📄 Converting ${originalMetadata.format} to JPEG for ${photo.filename}`);
+      resized = await sharpInstance
+        .jpeg({ 
+          quality: 95,
+          progressive: false,
+          chromaSubsampling: '4:2:0'
+        })
+        .toBuffer();
+    }
+    
+    const newMetadata = await sharp(resized).metadata();
+    console.log(`[NodeHelper] 📏 Resized ${photo.filename}: ${newMetadata.width}x${newMetadata.height} (${Math.round(resized.length / 1024)}KB)`);
+    console.log(`[NodeHelper] 🔍 Resized format: ${newMetadata.format}, channels: ${newMetadata.channels}, density: ${newMetadata.density}, space: ${newMetadata.space}`);
+    
+    // Update photo metadata with the actual resized dimensions
+    if (photo.mediaMetadata) {
+      photo.mediaMetadata.width = newMetadata.width;
+      photo.mediaMetadata.height = newMetadata.height;
+      console.log(`[NodeHelper] 📊 Updated metadata: ${photo.filename} dimensions to ${newMetadata.width}x${newMetadata.height}`);
+    }
+    
+    return resized;
+  } catch (error) {
+    console.error(`[NodeHelper] ❌ Failed to carefully resize ${photo.filename}:`, error.message);
+    throw error;
+  }
+}
+
+/**
  * @type {OneDrivePhotos}
  */
 let oneDrivePhotosInstance = null;
@@ -1417,6 +1501,19 @@ const nodeHelperObject = {
           const buf = await fetchToUint8Array(photo.baseUrl);
           buffer = Buffer.from(buf);
           break;
+        }
+      }
+
+      // Carefully resize image based on showWidth/showHeight config (preserving format exactly)
+      if (buffer && (this.config.showWidth || this.config.showHeight)) {
+        console.log(`[NodeHelper] 📏 Resizing ${photo.filename} from full resolution to fit ${this.config.showWidth}x${this.config.showHeight}`);
+        try {
+          const resizedBuffer = await resizeImageCarefully(buffer, photo, this.config);
+          buffer = resizedBuffer;
+          console.log(`[NodeHelper] ✅ Image resized to ${buffer.length} bytes`);
+        } catch (resizeError) {
+          console.warn(`[NodeHelper] ⚠️ Failed to resize image, using original:`, resizeError.message);
+          // Continue with original buffer if resize fails
         }
       }
 

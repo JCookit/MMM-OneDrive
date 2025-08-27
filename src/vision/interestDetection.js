@@ -71,7 +71,7 @@ class InterestDetector {
     let workingImage = null;
     try {
       // Resize large images for processing efficiency
-      workingImage = image;
+      workingImage = null; // Don't alias the original image
       let scale = 1.0;
       
       const maxDimension = 1200;
@@ -81,6 +81,9 @@ class InterestDetector {
         const newHeight = Math.round(image.rows * scale);
         workingImage = image.resize(newHeight, newWidth);
         this.log(`Resized to ${workingImage.cols}x${workingImage.rows} (scale: ${scale.toFixed(3)})`);
+      } else {
+        // Don't create a reference - work directly with the original image
+        workingImage = image; // This is safe as long as we don't release it
       }
       
       // Define safe zone (5% margin from edges)
@@ -188,8 +191,11 @@ class InterestDetector {
       console.error(`[InterestDetection] Error processing image: ${error.message}`);
       return [];
     } finally {
-      // CRITICAL: Release Mat objects
-      safeRelease(workingImage, 'working image');
+      // CRITICAL: Only release Mat objects we created (not the original image)
+      if (workingImage && workingImage !== image) {
+        safeRelease(workingImage, 'working image (resized copy)');
+      }
+      // Never release the original image - it's managed by the caller
     }
   }
   
