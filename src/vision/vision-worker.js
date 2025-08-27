@@ -330,7 +330,7 @@ class VisionWorker {
         faces: [],
         interestRegions: [],
         colorAnalysis: null,
-        debugImageBase64: null,
+        debugImageBuffer: null, // Binary buffer instead of base64
         error: error.message
       };
       
@@ -457,13 +457,13 @@ class VisionWorker {
       console.log(`[VisionWorker] ✅ Unified pipeline completed: ${faces.length} faces, ${interestRegions.length} interest regions, colors: ${colorAnalysis?.dominantColors?.length || 0}`);
       
       // Step 4: Create debug image if requested
-      let debugImageBase64 = null;
+      let debugImageBuffer = null;
       if (this.config?.debugMode) {
         try {
           console.debug(`[VisionWorker] Creating debug image for ${filename || 'unknown'}`);
-          // Use the preprocessed Mat directly for debug image
-          debugImageBase64 = await this.createDebugImageFromMat(preprocessedImage, faces, interestRegions, colorAnalysis);
-          console.debug(`[VisionWorker] Debug image created successfully`);
+          // Use the preprocessed Mat directly for debug image - returns binary buffer now
+          debugImageBuffer = await this.createDebugImageFromMat(preprocessedImage, faces, interestRegions, colorAnalysis);
+          console.debug(`[VisionWorker] Debug image created successfully (${debugImageBuffer.length} bytes)`);
         } catch (debugError) {
           console.warn(`[VisionWorker] Debug image creation failed:`, debugError.message);
         }
@@ -473,7 +473,7 @@ class VisionWorker {
         faces,
         interestRegions,
         colorAnalysis,
-        debugImageBase64
+        debugImageBuffer: debugImageBuffer ? Array.from(debugImageBuffer) : null // Convert Buffer to Array for IPC serialization
       };
       
     } finally {
@@ -494,7 +494,7 @@ class VisionWorker {
    * @param {Array} faces - Array of face detection results
    * @param {Array} interestRegions - Array of interest region candidates (ordered by confidence)
    * @param {Object} colorAnalysis - Color analysis results with dominant colors
-   * @returns {Promise<string>} Base64 encoded debug image
+   * @returns {Promise<Buffer>} Binary JPEG debug image buffer
    */
   async createDebugImageFromMat(preprocessedImage, faces, interestRegions, colorAnalysis) {
     let debugImage = null;
@@ -693,13 +693,15 @@ class VisionWorker {
       // Encode to JPEG buffer
       const encodedBuffer = cv.imencode('.jpg', debugImage);
       
-      // Convert to base64
-      const base64String = encodedBuffer.toString('base64');
+      // Convert OpenCV buffer to Node.js Buffer properly - encodedBuffer is already a Buffer
+      const binaryBuffer = encodedBuffer; // cv.imencode returns a Buffer directly
+      
+      console.debug(`[VisionWorker] Debug image encoded: ${binaryBuffer.length} bytes`);
       
       // Cleanup
       safeRelease(debugImage, 'debug image');
       
-      return base64String;
+      return binaryBuffer;
       
     } catch (error) {
       console.error(`[VisionWorker] Debug image creation error:`, error.message);

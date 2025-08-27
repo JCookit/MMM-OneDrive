@@ -76,11 +76,13 @@ Module.register<Config>("MMM-OneDrive", {
     }
 
     // Initialize photo caching system
-    this.photoCache = null; // Will store: { photo, photoBase64, album, interestingRectangleResult }
+    this.photoCache = null; // Will store: { photo, photoBuffer, mimeType, album, interestingRectangleResult }
     this.displayTimer = null;
     this.processingRequested = false;
+    this.currentBlobUrl = null; // For blob URL cleanup
+    this.currentDebugBlobUrl = null; // For debug image blob URL cleanup
 
-    console.log("[MMM-OneDrive] Frontend initialized with caching system");
+    console.log("[MMM-OneDrive] Frontend initialized with caching system and blob URL management");
     this.sendSocketNotification("INIT", config);
     this.dynamicPosition = 0;
     
@@ -296,11 +298,60 @@ Module.register<Config>("MMM-OneDrive", {
 
     console.log("[MMM-OneDrive] 📺 Displaying cached photo:", this.photoCache.photo.filename);
     
-    const { photo, photoBase64, album, interestingRectangleResult } = this.photoCache;
-    const url = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${photoBase64}`;
+    const { photo, photoBuffer, mimeType, album, interestingRectangleResult } = this.photoCache;
     
-    // Use marked image if face detection was performed and rectangles were burned in
-    const displayUrl = interestingRectangleResult?.markedImageUrl || url;
+    // Debug logging for troubleshooting
+    console.debug("[MMM-OneDrive] Photo cache contents:", {
+      hasPhotoBuffer: !!photoBuffer,
+      photoBufferSize: photoBuffer?.length || 0,
+      mimeType,
+      hasInterestingRectangleResult: !!interestingRectangleResult,
+      hasDebugImageBuffer: !!interestingRectangleResult?.debugImageBuffer,
+      debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0
+    });
+    
+    // Convert raw buffer to Blob URL (more efficient than base64)
+    const blob = new Blob([photoBuffer], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    
+    // Store blob URL for cleanup later
+    if (this.currentBlobUrl) {
+      URL.revokeObjectURL(this.currentBlobUrl);
+    }
+    this.currentBlobUrl = url;
+    
+    // Handle debug image if present (convert binary buffer to blob URL)
+    let displayUrl = url; // Default to main photo blob URL
+    
+    if (interestingRectangleResult?.debugImageBuffer) {
+      try {
+        console.debug("[MMM-OneDrive] 🔍 Processing debug image buffer...");
+        
+        // Convert debug image buffer to blob URL
+        const debugBlob = new Blob([interestingRectangleResult.debugImageBuffer], { type: 'image/jpeg' });
+        const debugBlobUrl = URL.createObjectURL(debugBlob);
+        
+        // Clean up previous debug blob URL
+        if (this.currentDebugBlobUrl) {
+          URL.revokeObjectURL(this.currentDebugBlobUrl);
+        }
+        this.currentDebugBlobUrl = debugBlobUrl;
+        
+        // Use debug image for display
+        displayUrl = debugBlobUrl;
+        
+        console.debug(`[MMM-OneDrive] ✅ Created debug image blob URL (${interestingRectangleResult.debugImageBuffer.length} bytes)`);
+        
+      } catch (error) {
+        console.error(`[MMM-OneDrive] ❌ Failed to create debug image blob URL:`, error);
+        // Fall back to main image
+        displayUrl = url;
+      }
+    } else {
+      console.debug("[MMM-OneDrive] ℹ️ No debug image buffer found, using main image");
+    }
+    
+    console.debug(`[MMM-OneDrive] Display URL type: ${displayUrl.startsWith('blob:') ? 'blob' : 'other'}`);
     
     this.render(displayUrl, photo, album, interestingRectangleResult);
     
@@ -960,6 +1011,20 @@ createStaticBackdropKeyframes: function(): void {
       clearTimeout(this.displayTimer);
       this.displayTimer = null;
     }
+    
+    // Clean up blob URLs to free memory
+    if (this.currentBlobUrl) {
+      URL.revokeObjectURL(this.currentBlobUrl);
+      this.currentBlobUrl = null;
+      console.debug("[MMM-OneDrive] 🗑️ Main blob URL cleaned up during suspend");
+    }
+    
+    if (this.currentDebugBlobUrl) {
+      URL.revokeObjectURL(this.currentDebugBlobUrl);
+      this.currentDebugBlobUrl = null;
+      console.debug("[MMM-OneDrive] 🗑️ Debug blob URL cleaned up during suspend");
+    }
+    
     this.sendSocketNotification("MODULE_SUSPENDED", undefined);
     this.suspended = true;
     const info = document.getElementById("ONEDRIVE_PHOTO_INFO");

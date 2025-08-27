@@ -589,7 +589,7 @@ const nodeHelperObject = {
    * This implements the decision-making logic that was previously in the worker
    */
   chooseFocalPointFromDetections: async function(detectionResults, imageBuffer, filename) {
-    const { faces, interestRegions, colorAnalysis, debugImageBase64 } = detectionResults;
+    const { faces, interestRegions, colorAnalysis, debugImageBuffer } = detectionResults;
     
     console.log(`[NodeHelper] 🎯 Choosing focal point from ${faces.length} faces and ${interestRegions.length} interest regions`);
     
@@ -642,7 +642,7 @@ const nodeHelperObject = {
         focalPoint: focalPoint,
         method: focalPoint.method,
         colorAnalysis: colorAnalysis,
-        debugImageBase64: debugImageBase64
+        debugImageBuffer: debugImageBuffer // Binary buffer instead of base64
       };
     }
     
@@ -668,7 +668,7 @@ const nodeHelperObject = {
         },
         method: 'interest_detection',
         colorAnalysis: colorAnalysis,
-        debugImageBase64: debugImageBase64
+        debugImageBuffer: debugImageBuffer // Binary buffer instead of base64
       };
     }
     
@@ -681,7 +681,7 @@ const nodeHelperObject = {
       focalPoint: centerFallback.focalPoint,
       method: centerFallback.method,
       colorAnalysis: colorAnalysis,
-      debugImageBase64: debugImageBase64
+      debugImageBuffer: debugImageBuffer // Binary buffer instead of base64
     };
   },
 
@@ -709,7 +709,7 @@ const nodeHelperObject = {
           faces: photo._visionResults.faces || [],
           interestRegions: photo._visionResults.interestRegions || [],
           colorAnalysis: photo._visionResults.colorAnalysis || null,
-          debugImageBase64: photo._visionResults.debugImageBase64
+          debugImageBuffer: photo._visionResults.debugImageBuffer // Binary buffer instead of base64
         };
         
         // Recompute focal point decision from cached detections
@@ -719,7 +719,7 @@ const nodeHelperObject = {
           focalPoint: focalPointResult.focalPoint,
           method: focalPointResult.method,
           colorAnalysis: focalPointResult.colorAnalysis,
-          debugImageBase64: focalPointResult.debugImageBase64,
+          debugImageBuffer: focalPointResult.debugImageBuffer, // Binary buffer instead of base64
           cached: true
         };
       }
@@ -751,6 +751,12 @@ const nodeHelperObject = {
         if (response.type === 'PROCESSING_RESULT') {
           const { result, processingTime } = response;
           
+          // Convert debugImageBuffer from Array back to Buffer (IPC serialization workaround)
+          if (result.debugImageBuffer && Array.isArray(result.debugImageBuffer)) {
+            result.debugImageBuffer = Buffer.from(result.debugImageBuffer);
+            console.debug(`[NodeHelper] Converted debug image from Array back to Buffer: ${result.debugImageBuffer.length} bytes`);
+          }
+          
           // Check if worker returned an error
           if (result.error) {
             console.log(`[NodeHelper] ⚠️ Vision worker returned error: ${result.error}`);
@@ -764,7 +770,7 @@ const nodeHelperObject = {
                 // No detection data for error cases
                 faces: [],
                 interestRegions: [],
-                debugImageBase64: null,
+                debugImageBuffer: null, // Binary buffer instead of base64
                 
                 // Error metadata
                 error: true,
@@ -795,7 +801,7 @@ const nodeHelperObject = {
               faces: result.faces || [],
               interestRegions: result.interestRegions || [],
               colorAnalysis: result.colorAnalysis || null,
-              debugImageBase64: result.debugImageBase64,
+              debugImageBuffer: result.debugImageBuffer, // Binary buffer instead of base64
               
               // Metadata
               error: false,
@@ -823,7 +829,7 @@ const nodeHelperObject = {
             // No detection data for error cases
             faces: [],
             interestRegions: [],
-            debugImageBase64: null,
+            debugImageBuffer: null, // Binary buffer instead of base64
             
             // Error metadata
             error: true,
@@ -852,7 +858,7 @@ const nodeHelperObject = {
           // No detection data for error cases
           faces: [],
           interestRegions: [],
-          debugImageBase64: null,
+          debugImageBuffer: null, // Binary buffer instead of base64
           
           // Error metadata
           error: true,
@@ -1043,6 +1049,15 @@ const nodeHelperObject = {
           }
           this.localPhotoList = [...cachedPhotoList].map((photo, index) => {
             photo._indexOfPhotos = index;
+            
+            // Convert base64 debug images back to binary buffers when loading from cache
+            if (photo._visionResults && photo._visionResults.debugImageBase64) {
+              photo._visionResults.debugImageBuffer = Buffer.from(photo._visionResults.debugImageBase64, 'base64');
+              // Remove the base64 version to save memory
+              delete photo._visionResults.debugImageBase64;
+              console.debug(`[NodeHelper] Converted cached debug image from base64 to buffer for ${photo.filename}`);
+            }
+            
             return photo;
           });
           this.log_info("successfully loaded photo list cache of ", this.localPhotoList.length, " photos");
@@ -1411,26 +1426,37 @@ const nodeHelperObject = {
       // Determine the source (album or folder) for display
       const source = album || folder;
 
-      const base64 = buffer.toString("base64");
-      const dataUrl = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${base64}`;
+      // Skip base64 encoding - send raw buffer to frontend
+      // const base64 = buffer.toString("base64");
+      // const dataUrl = `data:${photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType};base64,${base64}`;
 
       // Find interesting rectangle for Ken Burns effect (handles faces, interest detection, fallbacks)
       let interestingRectangleResult = null;
       if (this.config.kenBurnsEffect !== false && photo.filename) {
         interestingRectangleResult = await this.findInterestingRectangle(buffer, photo.filename);
         
-        // Debug image is now created by vision worker (if debugMode enabled)
-        if (this.config?.faceDetection?.debugMode && interestingRectangleResult?.debugImageBase64) {
-          interestingRectangleResult.markedImageUrl = `data:image/jpeg;base64,${interestingRectangleResult.debugImageBase64}`;
-          console.log(`[NodeHelper] Debug image received from vision worker for ${photo.filename}`);
-          this.log_debug(`Debug image received for ${photo.filename}`);
+        // Debug image is now created by vision worker as binary buffer (if debugMode enabled)
+        if (this.config?.faceDetection?.debugMode && interestingRectangleResult?.debugImageBuffer) {
+          // Store the binary buffer for frontend to convert to blob URL
+          console.log(`[NodeHelper] Debug image received from vision worker for ${photo.filename} (${interestingRectangleResult.debugImageBuffer.length} bytes)`);
+          this.log_debug(`Debug image received for ${photo.filename} (binary buffer)`);
         }
       }
 
-      console.log(`[NodeHelper] 📤 Sending photo to frontend: ${photo.filename}`);
+      console.log(`[NodeHelper] 📤 Sending photo to frontend: ${photo.filename} (${buffer.length} bytes, ${photo.mimeType})`);
+      console.debug(`[NodeHelper] Photo payload debug:`, {
+        hasPhotoBuffer: !!buffer,
+        photoBufferSize: buffer.length,
+        hasInterestingRectangleResult: !!interestingRectangleResult,
+        hasDebugImageBuffer: !!interestingRectangleResult?.debugImageBuffer,
+        debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0,
+        interestingRectangleMethod: interestingRectangleResult?.method || 'none'
+      });
+      
       this.log_debug("Image send to UI:", { id: photo.id, filename: photo.filename, index: photo._indexOfPhotos });
       this.sendSocketNotification("RENDER_PHOTO", { 
-        photoBase64: base64, 
+        photoBuffer: buffer, // Send raw binary buffer instead of base64
+        mimeType: photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType, // Store mime type separately
         photo, 
         album: source, 
         info: null, 
@@ -1471,7 +1497,24 @@ const nodeHelperObject = {
 
   savePhotoListCache: function () {
     (async () => {
-      await this.writeFileSafe(this.CACHE_PHOTOLIST_PATH, JSON.stringify(this.localPhotoList, null, 4), "Photo list cache");
+      // Create a copy of localPhotoList with debug image buffers converted to base64 for serialization
+      const serializablePhotoList = this.localPhotoList.map(photo => {
+        if (photo._visionResults && photo._visionResults.debugImageBuffer) {
+          // Convert binary debug image buffer to base64 for JSON serialization
+          const debugImageBase64 = photo._visionResults.debugImageBuffer.toString('base64');
+          const { debugImageBuffer, ...visionResultsWithoutBuffer } = photo._visionResults;
+          return {
+            ...photo,
+            _visionResults: {
+              ...visionResultsWithoutBuffer,
+              debugImageBase64: debugImageBase64 // Store as base64 in cache
+            }
+          };
+        }
+        return photo;
+      });
+      
+      await this.writeFileSafe(this.CACHE_PHOTOLIST_PATH, JSON.stringify(serializablePhotoList, null, 4), "Photo list cache");
       await this.saveCacheConfig("CACHE_PHOTOLIST_PATH", new Date().toISOString());
     })();
   },

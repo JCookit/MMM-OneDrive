@@ -1,0 +1,4 @@
+- if 'large' single face, prefer constant zoom out
+    - chance zoom in
+- if 'small' single face, zoom out, starting quickly then slow down
+- if 'large' interesting area, zoom out
