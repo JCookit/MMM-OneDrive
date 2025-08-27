@@ -23,7 +23,10 @@ const { error_to_string } = require("./error_to_string.js");
 const { cachePath } = require("./msal/authConfig.js");
 const { convertHEIC } = require("./photosConverter-node");
 const { fetchToUint8Array, FetchHTTPError } = require("./fetchItem-node");
-const sharp = require('sharp');
+
+// Canvas for image resizing (more stable than Sharp for this use case)
+const { createCanvas, loadImage } = require('canvas');
+const ExifReader = require('exifreader');
 
 
 /**
@@ -34,9 +37,9 @@ const sharp = require('sharp');
  */
 async function createCenterFallback(imageBuffer, method) {
   try {
-    // Get image dimensions using Sharp
-    const metadata = await sharp(imageBuffer).metadata();
-    const { width, height } = metadata;
+    // Get image dimensions using Canvas loadImage
+    const img = await loadImage(imageBuffer);
+    const { width, height } = img;
     
     // Create center rectangle (50% of image centered)
     const focalWidth = Math.round(width * 0.5);
@@ -142,88 +145,67 @@ const DEFAULT_SCAN_INTERVAL = 1000 * 60 * 55;
 const MINIMUM_SCAN_INTERVAL = 1000 * 60 * 10;
 
 /**
- * Very carefully resize image to preserve exact format characteristics that OpenCV expects
- * This matches the format from fetchToUint8Array as closely as possible
+ * Canvas-based image resizing with EXIF rotation support
+ * Stable alternative to Sharp that won't cause memory crashes
  * @param {Buffer} imageBuffer - Original image buffer from fetchToUint8Array
  * @param {Object} photo - Photo metadata for logging and updating
  * @param {Object} config - Configuration with showWidth/showHeight
- * @returns {Promise<Buffer>} Resized image buffer with same format characteristics
+ * @returns {Promise<Buffer>} Resized image buffer as JPEG
  */
 async function resizeImageCarefully(imageBuffer, photo, config) {
-  let sharpInstance = null;
-  let metadataInstance = null;
-  let validationInstance = null;
-  
   try {
     const startMemory = process.memoryUsage();
     const { showWidth, showHeight } = config;
     
-    // Get original metadata to preserve format exactly
-    metadataInstance = sharp(imageBuffer);
-    const originalMetadata = await metadataInstance.metadata();
-    console.log(`[NodeHelper] 📐 Original ${photo.filename}: ${originalMetadata.width}x${originalMetadata.height} (${Math.round(imageBuffer.length / 1024)}KB)`);
-    console.log(`[NodeHelper] 🔍 Original format: ${originalMetadata.format}, channels: ${originalMetadata.channels}, density: ${originalMetadata.density}, space: ${originalMetadata.space}`);
+    // Parse EXIF data for orientation and dimensions
+    let orientation = 1;
+    let originalWidth = 0;
+    let originalHeight = 0;
     
-    // Create Sharp instance with minimal processing to preserve original characteristics
-    sharpInstance = sharp(imageBuffer, {
-      // Preserve original settings
-      density: originalMetadata.density,
-      // Don't modify color space unless necessary
-    })
-      .rotate() // Only do EXIF rotation - this is essential and works fine
-      .resize(showWidth, showHeight, {
-        fit: 'inside', // Maintain aspect ratio, fit within bounds
-        withoutEnlargement: true // Don't upscale small images
-      });
-    
-    // Preserve the EXACT original format and quality settings
-    let resized;
-    if (originalMetadata.format === 'jpeg') {
-      // For JPEG, try to match the original quality and characteristics exactly
-      resized = await sharpInstance
-        .jpeg({ 
-          quality: 95, // High quality to preserve vision processing accuracy
-          progressive: false, // Match typical camera output
-          chromaSubsampling: '4:2:0', // Standard JPEG subsampling
-          trellisQuantisation: false, // Don't over-optimize
-          overshootDeringing: false,
-          optimiseScans: false,
-          // Keep it as close to original as possible
-        })
-        .toBuffer();
-    } else if (originalMetadata.format === 'png') {
-      // For PNG, preserve exactly
-      resized = await sharpInstance
-        .png({ 
-          compressionLevel: 6,
-          progressive: false,
-          // Preserve alpha channel if present
-          adaptiveFiltering: false
-        })
-        .toBuffer();
-    } else {
-      // For other formats, convert to JPEG with high quality
-      console.log(`[NodeHelper] 📄 Converting ${originalMetadata.format} to JPEG for ${photo.filename}`);
-      resized = await sharpInstance
-        .jpeg({ 
-          quality: 95,
-          progressive: false,
-          chromaSubsampling: '4:2:0'
-        })
-        .toBuffer();
+    try {
+      const tags = ExifReader.load(imageBuffer);
+      orientation = tags.Orientation?.value || 1;
+      originalWidth = tags['Image Width']?.value || 0;
+      originalHeight = tags['Image Height']?.value || 0;
+    } catch (exifError) {
+      console.log(`[NodeHelper] ⚠️ Could not read EXIF for ${photo.filename}, using defaults`);
     }
     
-    // Validate resized image with separate instance
-    validationInstance = sharp(resized);
-    const newMetadata = await validationInstance.metadata();
-    console.log(`[NodeHelper] 📏 Resized ${photo.filename}: ${newMetadata.width}x${newMetadata.height} (${Math.round(resized.length / 1024)}KB)`);
-    console.log(`[NodeHelper] 🔍 Resized format: ${newMetadata.format}, channels: ${newMetadata.channels}, density: ${newMetadata.density}, space: ${newMetadata.space}`);
+    // Load image into Canvas
+    const img = await loadImage(imageBuffer);
+    console.log(`[NodeHelper] � Original ${photo.filename}: ${img.width}x${img.height} (${Math.round(imageBuffer.length / 1024)}KB)`);
+    
+    // Calculate target dimensions while maintaining aspect ratio
+    const { width: targetWidth, height: targetHeight } = calculateResizeDimensions(
+      img.width, img.height, showWidth, showHeight
+    );
+    
+    // Determine if orientation requires dimension swap
+    const needsDimensionSwap = [5, 6, 7, 8].includes(orientation);
+    const canvasWidth = needsDimensionSwap ? targetHeight : targetWidth;
+    const canvasHeight = needsDimensionSwap ? targetWidth : targetHeight;
+    
+    // Create canvas for resizing
+    const canvas = createCanvas(canvasWidth, canvasHeight);
+    const ctx = canvas.getContext('2d');
+    
+    // Apply EXIF orientation transforms
+    applyExifTransform(ctx, orientation, canvasWidth, canvasHeight);
+    
+    // Draw the resized image
+    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+    
+    // Convert to JPEG buffer with high quality for vision processing
+    const resized = canvas.toBuffer('image/jpeg', { quality: 0.95 });
+    
+    console.log(`[NodeHelper] 📏 Resized ${photo.filename}: ${canvasWidth}x${canvasHeight} (${Math.round(resized.length / 1024)}KB)`);
+    console.log(`[NodeHelper] � Applied EXIF orientation: ${orientation}`);
     
     // Update photo metadata with the actual resized dimensions
     if (photo.mediaMetadata) {
-      photo.mediaMetadata.width = newMetadata.width;
-      photo.mediaMetadata.height = newMetadata.height;
-      console.log(`[NodeHelper] 📊 Updated metadata: ${photo.filename} dimensions to ${newMetadata.width}x${newMetadata.height}`);
+      photo.mediaMetadata.width = canvasWidth;
+      photo.mediaMetadata.height = canvasHeight;
+      console.log(`[NodeHelper] 📊 Updated metadata: ${photo.filename} dimensions to ${canvasWidth}x${canvasHeight}`);
     }
 
     const endMemory = process.memoryUsage();
@@ -234,27 +216,83 @@ async function resizeImageCarefully(imageBuffer, photo, config) {
     
     return resized;
   } catch (error) {
-    console.error(`[NodeHelper] ❌ Failed to carefully resize ${photo.filename}:`, error.message);
+    console.error(`[NodeHelper] ❌ Failed to resize with canvas ${photo.filename}:`, error.message);
     console.error(`[NodeHelper] ❌ Stack trace:`, error.stack);
     throw error;
-  } finally {
-    // Explicit cleanup of Sharp instances to prevent memory leaks
-    try {
-      if (sharpInstance && typeof sharpInstance.destroy === 'function') {
-        sharpInstance.destroy();
-        sharpInstance = null;
-      }
-      if (metadataInstance && typeof metadataInstance.destroy === 'function') {
-        metadataInstance.destroy();
-        metadataInstance = null;
-      }
-      if (validationInstance && typeof validationInstance.destroy === 'function') {
-        validationInstance.destroy();
-        validationInstance = null;
-      }
-    } catch (cleanupError) {
-      console.warn(`[NodeHelper] ⚠️ Sharp cleanup warning for ${photo.filename}:`, cleanupError.message);
-    }
+  }
+}
+
+/**
+ * Calculate resize dimensions maintaining aspect ratio
+ * @param {number} originalWidth 
+ * @param {number} originalHeight 
+ * @param {number} maxWidth 
+ * @param {number} maxHeight 
+ * @returns {{width: number, height: number}}
+ */
+function calculateResizeDimensions(originalWidth, originalHeight, maxWidth, maxHeight) {
+  if (!maxWidth && !maxHeight) {
+    return { width: originalWidth, height: originalHeight };
+  }
+  
+  const aspectRatio = originalWidth / originalHeight;
+  let targetWidth = originalWidth;
+  let targetHeight = originalHeight;
+  
+  // Fit inside bounds while maintaining aspect ratio
+  if (maxWidth && targetWidth > maxWidth) {
+    targetWidth = maxWidth;
+    targetHeight = Math.round(maxWidth / aspectRatio);
+  }
+  
+  if (maxHeight && targetHeight > maxHeight) {
+    targetHeight = maxHeight;
+    targetWidth = Math.round(maxHeight * aspectRatio);
+  }
+  
+  // Don't upscale small images
+  if (targetWidth > originalWidth || targetHeight > originalHeight) {
+    targetWidth = originalWidth;
+    targetHeight = originalHeight;
+  }
+  
+  return { width: targetWidth, height: targetHeight };
+}
+
+/**
+ * Apply EXIF orientation transforms to canvas context
+ * @param {CanvasRenderingContext2D} ctx 
+ * @param {number} orientation EXIF orientation value (1-8)
+ * @param {number} width Canvas width
+ * @param {number} height Canvas height
+ */
+function applyExifTransform(ctx, orientation, width, height) {
+  switch (orientation) {
+    case 1: // Normal - no transform needed
+      break;
+    case 2: // Horizontal flip
+      ctx.transform(-1, 0, 0, 1, width, 0);
+      break;
+    case 3: // 180° rotation
+      ctx.transform(-1, 0, 0, -1, width, height);
+      break;
+    case 4: // Vertical flip
+      ctx.transform(1, 0, 0, -1, 0, height);
+      break;
+    case 5: // Horizontal flip + 90° CCW
+      ctx.transform(0, 1, 1, 0, 0, 0);
+      break;
+    case 6: // 90° CW
+      ctx.transform(0, 1, -1, 0, height, 0);
+      break;
+    case 7: // Horizontal flip + 90° CW  
+      ctx.transform(0, -1, -1, 0, height, width);
+      break;
+    case 8: // 90° CCW
+      ctx.transform(0, -1, 1, 0, 0, width);
+      break;
+    default:
+      console.warn(`[NodeHelper] Unknown EXIF orientation: ${orientation}`);
   }
 }
 
@@ -1563,7 +1601,7 @@ const nodeHelperObject = {
       }
 
       // Carefully resize image based on showWidth/showHeight config (preserving format exactly)
-      if (false && buffer && (this.config.showWidth || this.config.showHeight)) {
+      if (buffer && (this.config.showWidth || this.config.showHeight)) {
         console.log(`[NodeHelper] 📏 Resizing ${photo.filename} from full resolution to fit ${this.config.showWidth}x${this.config.showHeight}`);
         logMemoryUsage(`before resizing ${photo.filename}`);
         try {
