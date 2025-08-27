@@ -159,53 +159,53 @@ async function resizeImageCarefully(imageBuffer, photo, config) {
     
     // Parse EXIF data for orientation and dimensions
     let orientation = 1;
-    let originalWidth = 0;
-    let originalHeight = 0;
     
     try {
       const tags = ExifReader.load(imageBuffer);
       orientation = tags.Orientation?.value || 1;
-      originalWidth = tags['Image Width']?.value || 0;
-      originalHeight = tags['Image Height']?.value || 0;
+      console.log(`[NodeHelper] 🔄 EXIF orientation: ${orientation}`);
     } catch (exifError) {
       console.log(`[NodeHelper] ⚠️ Could not read EXIF for ${photo.filename}, using defaults`);
     }
     
+    // Check if orientation requires 90-degree rotation
+    const needsRotation = [5, 6, 7, 8].includes(orientation);
+
     // Load image into Canvas
     const img = await loadImage(imageBuffer);
-    console.log(`[NodeHelper] � Original ${photo.filename}: ${img.width}x${img.height} (${Math.round(imageBuffer.length / 1024)}KB)`);
+    // get the original dimensions (in 'properly rotated' space); these are backwards if the photo needs rotation
+    const originalWidth = needsRotation ? img.height : img.width;
+    const originalHeight = needsRotation ? img.width : img.height;
+    console.log(`[NodeHelper] � Original ${photo.filename}: ${originalWidth}x${originalHeight} (${Math.round(imageBuffer.length / 1024)}KB)`);
     
-    // Calculate target dimensions while maintaining aspect ratio
+    // Calculate final output dimensions
     const { width: targetWidth, height: targetHeight } = calculateResizeDimensions(
-      img.width, img.height, showWidth, showHeight
+      originalWidth, originalHeight, showWidth, showHeight
     );
     
-    // Determine if orientation requires dimension swap
-    const needsDimensionSwap = [5, 6, 7, 8].includes(orientation);
-    const canvasWidth = needsDimensionSwap ? targetHeight : targetWidth;
-    const canvasHeight = needsDimensionSwap ? targetWidth : targetHeight;
+    console.log(`[NodeHelper] 🎯 Target dimensions: ${targetWidth}x${targetHeight}`);
     
-    // Create canvas for resizing
-    const canvas = createCanvas(canvasWidth, canvasHeight);
-    const ctx = canvas.getContext('2d');
+    // Create final canvas for single-step composite transformation
+    const finalCanvas = createCanvas(targetWidth, targetHeight);
+    const finalCtx = finalCanvas.getContext('2d');
     
-    // Apply EXIF orientation transforms
-    applyExifTransform(ctx, orientation, canvasWidth, canvasHeight);
+    // Apply single-step composite transform that combines scaling and EXIF orientation
+    applySingleStepTransform(finalCtx, orientation, originalWidth, originalHeight, targetWidth, targetHeight);
     
-    // Draw the resized image
-    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+    // Draw the image - the transform handles both resizing and rotation in one step
+    finalCtx.drawImage(img, 0, 0); 
     
     // Convert to JPEG buffer with high quality for vision processing
-    const resized = canvas.toBuffer('image/jpeg', { quality: 0.95 });
+    const resized = finalCanvas.toBuffer('image/jpeg', { quality: 0.95 });
     
-    console.log(`[NodeHelper] 📏 Resized ${photo.filename}: ${canvasWidth}x${canvasHeight} (${Math.round(resized.length / 1024)}KB)`);
+    console.log(`[NodeHelper] 📏 Final result ${photo.filename}: ${targetWidth}x${targetHeight} (${Math.round(resized.length / 1024)}KB)`);
     console.log(`[NodeHelper] � Applied EXIF orientation: ${orientation}`);
     
     // Update photo metadata with the actual resized dimensions
     if (photo.mediaMetadata) {
-      photo.mediaMetadata.width = canvasWidth;
-      photo.mediaMetadata.height = canvasHeight;
-      console.log(`[NodeHelper] 📊 Updated metadata: ${photo.filename} dimensions to ${canvasWidth}x${canvasHeight}`);
+      photo.mediaMetadata.width = targetWidth;
+      photo.mediaMetadata.height = targetHeight;
+      console.log(`[NodeHelper] 📊 Updated metadata: ${photo.filename} dimensions to ${targetWidth}x${targetHeight}`);
     }
 
     const endMemory = process.memoryUsage();
@@ -260,39 +260,49 @@ function calculateResizeDimensions(originalWidth, originalHeight, maxWidth, maxH
 }
 
 /**
- * Apply EXIF orientation transforms to canvas context
- * @param {CanvasRenderingContext2D} ctx 
- * @param {number} orientation EXIF orientation value (1-8)
- * @param {number} width Canvas width
- * @param {number} height Canvas height
+ * Apply a single-step composite transformation that combines scaling and EXIF rotation
+ * This is more efficient than the two-step approach and follows MDN best practices
  */
-function applyExifTransform(ctx, orientation, width, height) {
+function applySingleStepTransform(ctx, orientation, originalWidth, originalHeight, targetWidth, targetHeight) {
+  // Calculate scale factors
+  const scaleX = targetWidth / originalWidth;
+  const scaleY = targetHeight / originalHeight;
+  
+  // Calculate center points for rotation
+  const centerX = targetWidth / 2;
+  const centerY = targetHeight / 2;
+  
+  console.log(`[NodeHelper] Single-step transform: orientation=${orientation}, scale=(${scaleX.toFixed(3)}, ${scaleY.toFixed(3)}), center=(${centerX}, ${centerY})`);
+  
+  // Apply composite transformation based on EXIF orientation
   switch (orientation) {
-    case 1: // Normal - no transform needed
+    case 1: // Normal
+      ctx.transform(scaleX, 0, 0, scaleY, 0, 0);
       break;
     case 2: // Horizontal flip
-      ctx.transform(-1, 0, 0, 1, width, 0);
+      ctx.transform(-scaleX, 0, 0, scaleY, targetWidth, 0);
       break;
     case 3: // 180° rotation
-      ctx.transform(-1, 0, 0, -1, width, height);
+      ctx.transform(-scaleX, 0, 0, -scaleY, targetWidth, targetHeight);
       break;
     case 4: // Vertical flip
-      ctx.transform(1, 0, 0, -1, 0, height);
+      ctx.transform(scaleX, 0, 0, -scaleY, 0, targetHeight);
       break;
     case 5: // Horizontal flip + 90° CCW
-      ctx.transform(0, 1, 1, 0, 0, 0);
+      ctx.transform(0, -scaleY, scaleX, 0, 0, targetHeight);
       break;
     case 6: // 90° CW
-      ctx.transform(0, 1, -1, 0, height, 0);
+      ctx.transform(0, scaleY, -scaleX, 0, targetWidth, 0);
       break;
-    case 7: // Horizontal flip + 90° CW  
-      ctx.transform(0, -1, -1, 0, height, width);
+    case 7: // Horizontal flip + 90° CW
+      ctx.transform(0, -scaleY, -scaleX, 0, targetWidth, targetHeight);
       break;
     case 8: // 90° CCW
-      ctx.transform(0, -1, 1, 0, 0, width);
+      ctx.transform(0, -scaleY, scaleX, 0, 0, targetHeight);
       break;
     default:
       console.warn(`[NodeHelper] Unknown EXIF orientation: ${orientation}`);
+      ctx.transform(scaleX, 0, 0, scaleY, 0, 0);
   }
 }
 
