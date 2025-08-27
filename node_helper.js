@@ -150,16 +150,22 @@ const MINIMUM_SCAN_INTERVAL = 1000 * 60 * 10;
  * @returns {Promise<Buffer>} Resized image buffer with same format characteristics
  */
 async function resizeImageCarefully(imageBuffer, photo, config) {
+  let sharpInstance = null;
+  let metadataInstance = null;
+  let validationInstance = null;
+  
   try {
+    const startMemory = process.memoryUsage();
     const { showWidth, showHeight } = config;
     
     // Get original metadata to preserve format exactly
-    const originalMetadata = await sharp(imageBuffer).metadata();
+    metadataInstance = sharp(imageBuffer);
+    const originalMetadata = await metadataInstance.metadata();
     console.log(`[NodeHelper] 📐 Original ${photo.filename}: ${originalMetadata.width}x${originalMetadata.height} (${Math.round(imageBuffer.length / 1024)}KB)`);
     console.log(`[NodeHelper] 🔍 Original format: ${originalMetadata.format}, channels: ${originalMetadata.channels}, density: ${originalMetadata.density}, space: ${originalMetadata.space}`);
     
     // Create Sharp instance with minimal processing to preserve original characteristics
-    let sharpInstance = sharp(imageBuffer, {
+    sharpInstance = sharp(imageBuffer, {
       // Preserve original settings
       density: originalMetadata.density,
       // Don't modify color space unless necessary
@@ -207,7 +213,9 @@ async function resizeImageCarefully(imageBuffer, photo, config) {
         .toBuffer();
     }
     
-    const newMetadata = await sharp(resized).metadata();
+    // Validate resized image with separate instance
+    validationInstance = sharp(resized);
+    const newMetadata = await validationInstance.metadata();
     console.log(`[NodeHelper] 📏 Resized ${photo.filename}: ${newMetadata.width}x${newMetadata.height} (${Math.round(resized.length / 1024)}KB)`);
     console.log(`[NodeHelper] 🔍 Resized format: ${newMetadata.format}, channels: ${newMetadata.channels}, density: ${newMetadata.density}, space: ${newMetadata.space}`);
     
@@ -217,12 +225,61 @@ async function resizeImageCarefully(imageBuffer, photo, config) {
       photo.mediaMetadata.height = newMetadata.height;
       console.log(`[NodeHelper] 📊 Updated metadata: ${photo.filename} dimensions to ${newMetadata.width}x${newMetadata.height}`);
     }
+
+    const endMemory = process.memoryUsage();
+    const memoryDelta = endMemory.heapUsed - startMemory.heapUsed;
+    if (memoryDelta > 10 * 1024 * 1024) { // Log if > 10MB memory delta
+      console.log(`[NodeHelper] 🧠 Memory delta for ${photo.filename}: ${Math.round(memoryDelta / 1024 / 1024)}MB`);
+    }
     
     return resized;
   } catch (error) {
     console.error(`[NodeHelper] ❌ Failed to carefully resize ${photo.filename}:`, error.message);
+    console.error(`[NodeHelper] ❌ Stack trace:`, error.stack);
     throw error;
+  } finally {
+    // Explicit cleanup of Sharp instances to prevent memory leaks
+    try {
+      if (sharpInstance && typeof sharpInstance.destroy === 'function') {
+        sharpInstance.destroy();
+        sharpInstance = null;
+      }
+      if (metadataInstance && typeof metadataInstance.destroy === 'function') {
+        metadataInstance.destroy();
+        metadataInstance = null;
+      }
+      if (validationInstance && typeof validationInstance.destroy === 'function') {
+        validationInstance.destroy();
+        validationInstance = null;
+      }
+    } catch (cleanupError) {
+      console.warn(`[NodeHelper] ⚠️ Sharp cleanup warning for ${photo.filename}:`, cleanupError.message);
+    }
   }
+}
+
+/**
+ * Monitor memory usage and log warnings if high
+ */
+function logMemoryUsage(context = '') {
+  const usage = process.memoryUsage();
+  const heapMB = Math.round(usage.heapUsed / 1024 / 1024);
+  const externalMB = Math.round(usage.external / 1024 / 1024);
+  const totalMB = heapMB + externalMB;
+  
+  if (totalMB > 200) { // Log if total memory > 200MB
+    console.warn(`[NodeHelper] 🧠 High memory usage${context ? ' during ' + context : ''}: Heap ${heapMB}MB + External ${externalMB}MB = ${totalMB}MB total`);
+    
+    // Suggest garbage collection if memory is very high
+    if (totalMB > 300 && global.gc) {
+      console.log(`[NodeHelper] 🧹 Triggering garbage collection due to high memory usage`);
+      global.gc();
+    }
+  } else if (context && totalMB > 100) { // Log medium usage for specific contexts
+    console.log(`[NodeHelper] 📊 Memory usage${context ? ' during ' + context : ''}: ${totalMB}MB total`);
+  }
+  
+  return { heapMB, externalMB, totalMB };
 }
 
 /**
@@ -1446,6 +1503,7 @@ const nodeHelperObject = {
   },
 
   prepareShowPhoto: async function ({ photoId }) {
+    logMemoryUsage(`prepareShowPhoto start for ${photoId}`);
 
     const photo = this.localPhotoList.find((p) => p.id === photoId);
     if (!photo) {
@@ -1507,10 +1565,12 @@ const nodeHelperObject = {
       // Carefully resize image based on showWidth/showHeight config (preserving format exactly)
       if (buffer && (this.config.showWidth || this.config.showHeight)) {
         console.log(`[NodeHelper] 📏 Resizing ${photo.filename} from full resolution to fit ${this.config.showWidth}x${this.config.showHeight}`);
+        logMemoryUsage(`before resizing ${photo.filename}`);
         try {
           const resizedBuffer = await resizeImageCarefully(buffer, photo, this.config);
           buffer = resizedBuffer;
           console.log(`[NodeHelper] ✅ Image resized to ${buffer.length} bytes`);
+          logMemoryUsage(`after resizing ${photo.filename}`);
         } catch (resizeError) {
           console.warn(`[NodeHelper] ⚠️ Failed to resize image, using original:`, resizeError.message);
           // Continue with original buffer if resize fails
@@ -1530,7 +1590,9 @@ const nodeHelperObject = {
       // Find interesting rectangle for Ken Burns effect (handles faces, interest detection, fallbacks)
       let interestingRectangleResult = null;
       if (this.config.kenBurnsEffect !== false && photo.filename) {
+        logMemoryUsage(`before vision processing ${photo.filename}`);
         interestingRectangleResult = await this.findInterestingRectangle(buffer, photo.filename);
+        logMemoryUsage(`after vision processing ${photo.filename}`);
         
         // Debug image is now created by vision worker as binary buffer (if debugMode enabled)
         if (this.config?.faceDetection?.debugMode && interestingRectangleResult?.debugImageBuffer) {
@@ -1566,6 +1628,8 @@ const nodeHelperObject = {
       if (interestingRectangleResult?.markedImageBuffer) {
         interestingRectangleResult.markedImageBuffer = null;
       }
+      
+      logMemoryUsage(`prepareShowPhoto complete for ${photo.filename}`);
       
     } catch (err) {
       this.sendSocketNotification("NO_PHOTO");  // prime the pump for the UX asking again
