@@ -1128,10 +1128,33 @@ const nodeHelperObject = {
     // Get image dimensions for animation rule calculations
     let imageWidth, imageHeight;
     try {
-      const sharp = require('sharp');
-      const metadata = await sharp(imageBuffer).metadata();
-      imageWidth = metadata.width;
-      imageHeight = metadata.height;
+      // Use Canvas to get image dimensions (more reliable than Sharp for this use case)
+      const img = await loadImage(imageBuffer);
+      let width = img.width;
+      let height = img.height;
+      
+      // Handle EXIF rotation - check if image needs to be rotated
+      try {
+        const exifData = ExifReader.load(imageBuffer);
+        const orientation = exifData.Orientation?.value;
+        
+        // EXIF orientations 6 and 8 require width/height swap
+        // 6 = Rotate 90 CW, 8 = Rotate 90 CCW
+        if (orientation === 6 || orientation === 8) {
+          console.debug(`[NodeHelper] EXIF rotation detected (${orientation}), swapping dimensions`);
+          imageWidth = height; // Swap for rotated images
+          imageHeight = width;
+        } else {
+          imageWidth = width;
+          imageHeight = height;
+        }
+      } catch (exifError) {
+        // If EXIF reading fails, use original dimensions
+        console.debug(`[NodeHelper] No EXIF data found or error reading EXIF, using original dimensions`);
+        imageWidth = width;
+        imageHeight = height;
+      }
+      
     } catch (error) {
       console.error('[NodeHelper] Failed to get image dimensions:', error);
       imageWidth = 1920; // Default fallback
