@@ -985,6 +985,30 @@ const nodeHelperObject = {
   },
 
   /**
+   * Helper function to pad a bounding box for smoother animations on small faces
+   * Expands the bounding box by a percentage while keeping it within image boundaries
+   */
+  padBoundingBox: function(focalPoint, imageWidth, imageHeight, paddingPercent = 0.5) {
+    const paddingX = focalPoint.width * paddingPercent;
+    const paddingY = focalPoint.height * paddingPercent;
+    
+    const paddedX = Math.max(0, focalPoint.x - paddingX);
+    const paddedY = Math.max(0, focalPoint.y - paddingY);
+    const paddedWidth = Math.min(imageWidth - paddedX, focalPoint.width + (2 * paddingX));
+    const paddedHeight = Math.min(imageHeight - paddedY, focalPoint.height + (2 * paddingY));
+    
+    console.debug(`[NodeHelper] 📦 Padded bounding box: original=[${focalPoint.x.toFixed(1)}, ${focalPoint.y.toFixed(1)}, ${focalPoint.width.toFixed(1)}, ${focalPoint.height.toFixed(1)}] → padded=[${paddedX.toFixed(1)}, ${paddedY.toFixed(1)}, ${paddedWidth.toFixed(1)}, ${paddedHeight.toFixed(1)}]`);
+    
+    return {
+      ...focalPoint,
+      x: paddedX,
+      y: paddedY,
+      width: paddedWidth,
+      height: paddedHeight
+    };
+  },
+
+  /**
    * Helper function to make weighted random choice based on adjusted probabilities
    */
   makeWeightedChoice: function(options) {
@@ -1041,17 +1065,18 @@ const nodeHelperObject = {
     
     // RULE 3: Small single face OR small bounding box around multiple faces
     if (this.isSmallFace(faces, imageWidth, imageHeight)) {
-      // Original probabilities: zoom_out_fast: 80%, static: 20%
+      // Original probabilities: zoom_out (with padding): 80%, static: 20%
+      // Note: Changed from zoom_out_fast to zoom_out with padded bounding box for smoother animation
       const originalOptions = {
-        'zoom_out_fast': 0.8,
+        'zoom_out': 0.8,  // Will be combined with padded bounding box
         'static': 0.2
       };
       
       const adjustedOptions = this.adjustProbabilitiesForVariety(originalOptions, previousAnimationType);
       const chosenType = this.makeWeightedChoice(adjustedOptions);
       
-      console.debug(`[NodeHelper] Rule 3: Small face(s) → ${chosenType} (adjusted for variety from ${previousAnimationType})`);
-      return { type: chosenType, reason: 'small_face' };
+      console.debug(`[NodeHelper] Rule 3: Small face(s) → ${chosenType} with padded bounding box (adjusted for variety from ${previousAnimationType})`);
+      return { type: chosenType, reason: 'small_face_padded' }; // Special reason to trigger padding
     }
     
     // RULE 4: No faces, but interesting areas away from center (deterministic - no variety adjustment needed)
@@ -1165,6 +1190,11 @@ const nodeHelperObject = {
         
         console.log(`[NodeHelper] Created all-faces bounding box for ${faces.length} faces: ` +
                    `rect=[${minX.toFixed(3)}, ${minY.toFixed(3)}, ${(maxX - minX).toFixed(3)}, ${(maxY - minY).toFixed(3)}]`);
+      }
+      
+      // Apply padding for small face scenarios to make zoom animations smoother
+      if (animationInfo.reason === 'small_face_padded') {
+        focalPoint = this.padBoundingBox(focalPoint, imageWidth, imageHeight, 0.5); // 50% padding
       }
       
       console.log(`[NodeHelper] 🎬 Animation chosen: ${animationInfo.type} (${animationInfo.reason})`);
