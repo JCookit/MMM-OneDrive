@@ -315,7 +315,7 @@ function logMemoryUsage(context = '') {
   const externalMB = Math.round(usage.external / 1024 / 1024);
   const totalMB = heapMB + externalMB;
   
-  if (totalMB > 200) { // Log if total memory > 200MB
+  if (totalMB > 500) { // Log if total memory > 500MB
     console.warn(`[NodeHelper] 🧠 High memory usage${context ? ' during ' + context : ''}: Heap ${heapMB}MB + External ${externalMB}MB = ${totalMB}MB total`);
     
     // Suggest garbage collection if memory is very high
@@ -358,6 +358,9 @@ const nodeHelperObject = {
     this.photoRefreshPointer = 0;
     this.queue = null;
     this.initializeTimer = null;
+    
+    // Track previous animation type for variety
+    this.previousAnimationType = 'static'; // Default to static for first photo
 
     this.CACHE_ALBUMNS_PATH = path.resolve(this.path, "cache", "selectedAlbumsCache.json");
     this.CACHE_FOLDERS_PATH = path.resolve(this.path, "cache", "selectedFoldersCache.json");
@@ -773,6 +776,321 @@ const nodeHelperObject = {
 
   // ==================== END VISION WORKER MANAGEMENT ====================
 
+  // ==================== ANIMATION RULE HELPER FUNCTIONS ====================
+  
+  /**
+   * Check if there are faces detected in the vision results
+   */
+  hasFaces: function(faces) {
+    return faces && faces.length > 0;
+  },
+
+  /**
+   * Check if a single face or face bounding box is considered "large"
+   * Large = takes up more than 15% of the image area
+   */
+  isLargeFace: function(faces, imageWidth, imageHeight) {
+    if (!faces || faces.length === 0) return false;
+    
+    const imageArea = imageWidth * imageHeight;
+    const threshold = imageArea * 0.15; // 15% of image area
+    
+    let faceArea = 0;
+    
+    if (faces.length === 1) {
+      // Single face
+      const face = faces[0];
+      faceArea = face.width * face.height;
+    } else {
+      // Multiple faces - check bounding box area
+      const boundingBox = this.getFacesBoundingBox(faces);
+      faceArea = boundingBox.width * boundingBox.height;
+    }
+    
+    const result = faceArea > threshold;
+    console.debug(`[NodeHelper] isLargeFace: faceArea=${faceArea.toFixed(0)}, threshold=${threshold.toFixed(0)}, result=${result}`);
+    return result;
+  },
+
+  /**
+   * Check if a single face or face bounding box is considered "small"
+   * Small = takes up less than 8% of the image area
+   */
+  isSmallFace: function(faces, imageWidth, imageHeight) {
+    if (!faces || faces.length === 0) return false;
+    
+    const imageArea = imageWidth * imageHeight;
+    const threshold = imageArea * 0.08; // 8% of image area
+    
+    let faceArea = 0;
+    
+    if (faces.length === 1) {
+      // Single face
+      const face = faces[0];
+      faceArea = face.width * face.height;
+    } else {
+      // Multiple faces - check bounding box area
+      const boundingBox = this.getFacesBoundingBox(faces);
+      faceArea = boundingBox.width * boundingBox.height;
+    }
+    
+    const result = faceArea < threshold;
+    console.debug(`[NodeHelper] isSmallFace: faceArea=${faceArea.toFixed(0)}, threshold=${threshold.toFixed(0)}, result=${result}`);
+    return result;
+  },
+
+  /**
+   * Check if faces span most of the picture in the same aspect ratio
+   * "Most" = bounding box covers >70% of image width OR height (whichever is dominant)
+   */
+  facesSpanMostOfPicture: function(faces, imageWidth, imageHeight) {
+    if (!faces || faces.length < 1) return false;
+    
+    const boundingBox = this.getFacesBoundingBox(faces);
+    const isLandscape = imageWidth > imageHeight;
+    
+    let result = false;
+    if (isLandscape) {
+      // For landscape images, check if faces span most of the width
+      const widthCoverage = boundingBox.width / imageWidth;
+      result = widthCoverage > 0.7; // 70% of width
+    } else {
+      // For portrait images, check if faces span most of the height
+      const heightCoverage = boundingBox.height / imageHeight;
+      result = heightCoverage > 0.7; // 70% of height
+    }
+    
+    console.debug(`[NodeHelper] facesSpanMostOfPicture: ${faces.length} faces, coverage=${result ? '>70%' : '<70%'}, result=${result}`);
+    return result;
+  },
+
+  /**
+   * Get bounding box that encompasses all faces
+   */
+  getFacesBoundingBox: function(faces) {
+    if (!faces || faces.length === 0) return null;
+    if (faces.length === 1) return faces[0];
+    
+    let minX = faces[0].x;
+    let minY = faces[0].y;
+    let maxX = faces[0].x + faces[0].width;
+    let maxY = faces[0].y + faces[0].height;
+    
+    for (let i = 1; i < faces.length; i++) {
+      const face = faces[i];
+      minX = Math.min(minX, face.x);
+      minY = Math.min(minY, face.y);
+      maxX = Math.max(maxX, face.x + face.width);
+      maxY = Math.max(maxY, face.y + face.height);
+    }
+    
+    return {
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY
+    };
+  },
+
+  /**
+   * Check if interesting areas exist but none are close to center
+   * "Close to center" = within 30% of image center
+   */
+  hasInterestingAreasAwayFromCenter: function(interestRegions, imageWidth, imageHeight) {
+    if (!interestRegions || interestRegions.length === 0 || !imageWidth || !imageHeight) return false;
+    
+    const centerX = imageWidth / 2;
+    const centerY = imageHeight / 2;
+    const proximityThreshold = Math.max(imageWidth, imageHeight) * 0.3; // 30% of larger dimension
+    
+    // Check if any interesting area is close to center
+    const hasNearCenterArea = interestRegions.some(area => {
+      const areaX = area.x + area.width / 2;
+      const areaY = area.y + area.height / 2;
+      const distance = Math.sqrt(Math.pow(areaX - centerX, 2) + Math.pow(areaY - centerY, 2));
+      return distance <= proximityThreshold;
+    });
+    
+    const result = !hasNearCenterArea; // Return true if NO areas are near center
+    console.debug(`[NodeHelper] hasInterestingAreasAwayFromCenter: areas=${interestRegions.length}, hasNearCenter=${hasNearCenterArea}, result=${result}`);
+    return result;
+  },
+
+  /**
+   * Get the interesting area closest to the image center
+   */
+  getInterestingAreaClosestToCenter: function(interestRegions, imageWidth, imageHeight) {
+    if (!interestRegions || interestRegions.length === 0 || !imageWidth || !imageHeight) return null;
+    
+    const centerX = imageWidth / 2;
+    const centerY = imageHeight / 2;
+    
+    let closestArea = null;
+    let closestDistance = Infinity;
+    
+    interestRegions.forEach(area => {
+      const areaX = area.x + area.width / 2;
+      const areaY = area.y + area.height / 2;
+      const distance = Math.sqrt(Math.pow(areaX - centerX, 2) + Math.pow(areaY - centerY, 2));
+      
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestArea = area;
+      }
+    });
+    
+    console.debug(`[NodeHelper] getInterestingAreaClosestToCenter: areas=${interestRegions.length}, closestDistance=${closestDistance.toFixed(0)}, result=${!!closestArea}`);
+    return closestArea;
+  },
+
+  /**
+   * Helper function to adjust probabilities based on previous animation for variety
+   */
+  adjustProbabilitiesForVariety: function(options, previousAnimationType) {
+    const VARIETY_BOOST = 0.15; // Amount to boost alternatives
+    const REPETITION_PENALTY = 0.3; // Amount to reduce repeated animation
+    
+    let totalAdjustment = 0;
+    let adjustedOptions = {};
+    
+    // First pass: apply penalties and calculate total adjustment needed
+    for (const [type, prob] of Object.entries(options)) {
+      if (type === previousAnimationType) {
+        // Reduce probability of repeating the same animation
+        adjustedOptions[type] = Math.max(0.05, prob - REPETITION_PENALTY); // Minimum 5%
+        totalAdjustment += (prob - adjustedOptions[type]);
+      } else {
+        adjustedOptions[type] = prob;
+      }
+    }
+    
+    // Second pass: distribute the adjustment among other options
+    const alternativeTypes = Object.keys(adjustedOptions).filter(type => type !== previousAnimationType);
+    if (alternativeTypes.length > 0 && totalAdjustment > 0) {
+      const boostPerAlternative = totalAdjustment / alternativeTypes.length;
+      alternativeTypes.forEach(type => {
+        adjustedOptions[type] = Math.min(1.0, adjustedOptions[type] + boostPerAlternative);
+      });
+    }
+    
+    // Normalize to ensure probabilities sum to 1.0
+    const totalProb = Object.values(adjustedOptions).reduce((sum, prob) => sum + prob, 0);
+    if (totalProb > 0) {
+      Object.keys(adjustedOptions).forEach(type => {
+        adjustedOptions[type] = adjustedOptions[type] / totalProb;
+      });
+    }
+    
+    return adjustedOptions;
+  },
+
+  /**
+   * Helper function to make weighted random choice based on adjusted probabilities
+   */
+  makeWeightedChoice: function(options) {
+    const rand = Math.random();
+    let cumulativeProb = 0;
+    
+    for (const [type, prob] of Object.entries(options)) {
+      cumulativeProb += prob;
+      if (rand < cumulativeProb) {
+        return type;
+      }
+    }
+    
+    // Fallback to first option if something goes wrong
+    return Object.keys(options)[0];
+  },
+
+  /**
+   * Rule-based animation type determination with variety tracking
+   * Returns one of: 'static', 'zoom_out', 'zoom_in', 'zoom_out_fast'
+   */
+  determineAnimationType: function(faces, interestRegions, imageWidth, imageHeight, previousAnimationType = 'static') {
+    
+    // DEBUG: Log what we have to work with
+    console.log("[NodeHelper] 🔍 Animation rule debugging:", {
+      facesCount: faces?.length || 0,
+      interestRegionsCount: interestRegions?.length || 0,
+      imageWidth,
+      imageHeight,
+      previousAnimation: previousAnimationType
+    });
+    
+    // RULE 1: Multiple faces spanning most of the picture (deterministic - no variety adjustment needed)
+    if (this.facesSpanMostOfPicture(faces, imageWidth, imageHeight)) {
+      console.debug("[NodeHelper] Rule 1: Multiple faces span most of picture → Static");
+      return { type: 'static', reason: 'faces_span_most' };
+    }
+    
+    // RULE 2: Large single face OR large bounding box around multiple faces
+    if (this.isLargeFace(faces, imageWidth, imageHeight)) {
+      // Original probabilities: zoom_out: 50%, zoom_in: 40%, static: 10%
+      const originalOptions = {
+        'zoom_out': 0.5,
+        'zoom_in': 0.4, 
+        'static': 0.1
+      };
+      
+      const adjustedOptions = this.adjustProbabilitiesForVariety(originalOptions, previousAnimationType);
+      const chosenType = this.makeWeightedChoice(adjustedOptions);
+      
+      console.debug(`[NodeHelper] Rule 2: Large face(s) → ${chosenType} (adjusted for variety from ${previousAnimationType})`);
+      return { type: chosenType, reason: 'large_face' };
+    }
+    
+    // RULE 3: Small single face OR small bounding box around multiple faces
+    if (this.isSmallFace(faces, imageWidth, imageHeight)) {
+      // Original probabilities: zoom_out_fast: 80%, static: 20%
+      const originalOptions = {
+        'zoom_out_fast': 0.8,
+        'static': 0.2
+      };
+      
+      const adjustedOptions = this.adjustProbabilitiesForVariety(originalOptions, previousAnimationType);
+      const chosenType = this.makeWeightedChoice(adjustedOptions);
+      
+      console.debug(`[NodeHelper] Rule 3: Small face(s) → ${chosenType} (adjusted for variety from ${previousAnimationType})`);
+      return { type: chosenType, reason: 'small_face' };
+    }
+    
+    // RULE 4: No faces, but interesting areas away from center (deterministic - no variety adjustment needed)
+    if (!this.hasFaces(faces) && this.hasInterestingAreasAwayFromCenter(interestRegions, imageWidth, imageHeight)) {
+      console.debug("[NodeHelper] Rule 4: Interesting areas away from center → Static");
+      return { type: 'static', reason: 'interesting_away_from_center' };
+    }
+    
+    // RULE 5: No faces, but interesting area close to center
+    if (!this.hasFaces(faces)) {
+      const centerArea = this.getInterestingAreaClosestToCenter(interestRegions, imageWidth, imageHeight);
+      if (centerArea) {
+        // Original probabilities: zoom_in: 50%, zoom_out: 50%
+        const originalOptions = {
+          'zoom_in': 0.5,
+          'zoom_out': 0.5
+        };
+        
+        const adjustedOptions = this.adjustProbabilitiesForVariety(originalOptions, previousAnimationType);
+        const chosenType = this.makeWeightedChoice(adjustedOptions);
+        
+        console.debug(`[NodeHelper] Rule 5: Interesting area near center → ${chosenType} (adjusted for variety from ${previousAnimationType})`);
+        return { type: chosenType, reason: 'interesting_near_center' };
+      }
+    }
+    
+    // RULE 6: Fallback - no other rules matched
+    const originalOptions = {
+      'zoom_out': 0.6,
+      'static': 0.4
+    };
+    
+    const adjustedOptions = this.adjustProbabilitiesForVariety(originalOptions, previousAnimationType);
+    const chosenType = this.makeWeightedChoice(adjustedOptions);
+    
+    console.debug(`[NodeHelper] Rule 6: Fallback → ${chosenType} (adjusted for variety from ${previousAnimationType})`);
+    return { type: chosenType, reason: 'fallback_default' };
+  },
+
   /**
    * Choose the best focal point from face detection and interest region results
    * This implements the decision-making logic that was previously in the worker
@@ -781,6 +1099,28 @@ const nodeHelperObject = {
     const { faces, interestRegions, colorAnalysis, debugImageBuffer } = detectionResults;
     
     console.log(`[NodeHelper] 🎯 Choosing focal point from ${faces.length} faces and ${interestRegions.length} interest regions`);
+
+    // Get image dimensions for animation rule calculations
+    let imageWidth, imageHeight;
+    try {
+      const sharp = require('sharp');
+      const metadata = await sharp(imageBuffer).metadata();
+      imageWidth = metadata.width;
+      imageHeight = metadata.height;
+    } catch (error) {
+      console.error('[NodeHelper] Failed to get image dimensions:', error);
+      imageWidth = 1920; // Default fallback
+      imageHeight = 1080;
+    }
+    
+    console.log(`[NodeHelper] 🖼️ Image dimensions: ${imageWidth} x ${imageHeight}`);
+    
+    // Determine animation type based on faces and interest regions, considering previous animation for variety
+    const animationInfo = this.determineAnimationType(faces || [], interestRegions || [], imageWidth, imageHeight, this.previousAnimationType);
+    
+    // Track this animation type for variety in the next photo
+    this.previousAnimationType = animationInfo.type;
+    console.log(`[NodeHelper] 🎬 Animation chosen: ${animationInfo.type} (${animationInfo.reason}) - tracked for next photo`);
     
     // Priority 1: Use faces if available - construct all-faces bounding box
     if (faces && faces.length > 0) {
@@ -827,9 +1167,13 @@ const nodeHelperObject = {
                    `rect=[${minX.toFixed(3)}, ${minY.toFixed(3)}, ${(maxX - minX).toFixed(3)}, ${(maxY - minY).toFixed(3)}]`);
       }
       
+      console.log(`[NodeHelper] 🎬 Animation chosen: ${animationInfo.type} (${animationInfo.reason})`);
+      
       return {
         focalPoint: focalPoint,
         method: focalPoint.method,
+        animationType: animationInfo.type,
+        animationReason: animationInfo.reason,
         colorAnalysis: colorAnalysis,
         debugImageBuffer: debugImageBuffer // Binary buffer instead of base64
       };
@@ -856,6 +1200,8 @@ const nodeHelperObject = {
           confidence: bestInterest.confidence
         },
         method: 'interest_detection',
+        animationType: animationInfo.type,
+        animationReason: animationInfo.reason,
         colorAnalysis: colorAnalysis,
         debugImageBuffer: debugImageBuffer // Binary buffer instead of base64
       };
@@ -869,6 +1215,8 @@ const nodeHelperObject = {
     return {
       focalPoint: centerFallback.focalPoint,
       method: centerFallback.method,
+      animationType: animationInfo.type,
+      animationReason: animationInfo.reason,
       colorAnalysis: colorAnalysis,
       debugImageBuffer: debugImageBuffer // Binary buffer instead of base64
     };

@@ -384,9 +384,9 @@ Module.register<Config>("MMM-OneDrive", {
   // ==================== KEN BURNS DYNAMIC ANIMATION ==================== 
   createStaticKenBurnsKeyframes: function(): void {
     // Only create once
-    if (document.getElementById('ken-burns-static')) return;
+    if (document.getElementById('ken-burns-keyframes')) return;
     
-    const staticKeyframes = `
+    const keyframeStyles = `
       /* Hardware acceleration optimization for Ken Burns */
       #ONEDRIVE_PHOTO_CURRENT, #ONEDRIVE_PHOTO_CURRENT img {
         /* Force GPU acceleration */
@@ -402,7 +402,24 @@ Module.register<Config>("MMM-OneDrive", {
         transform: translateZ(0);
       }
 
+      /* Static animation - fade in/out only, no movement */
       @keyframes ken-burns-static {
+        0% {
+          opacity: 0;
+        }
+        10% {
+          opacity: 1;
+        }
+        90% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0;
+        }
+      }
+
+      /* Zoom out animation - start zoomed in, end at natural size */
+      @keyframes ken-burns-zoom-out {
         0% {
           opacity: 0;
           transform: scale3d(var(--start-scale, 1.5), var(--start-scale, 1.5), 1) 
@@ -419,11 +436,53 @@ Module.register<Config>("MMM-OneDrive", {
           transform: scale3d(1.0, 1.0, 1) translate3d(0%, 0%, 0);
         }
       }
+
+      /* Zoom in animation - start at natural size, end zoomed in */
+      @keyframes ken-burns-zoom-in {
+        0% {
+          opacity: 0;
+          transform: scale3d(1.0, 1.0, 1) translate3d(0%, 0%, 0);
+        }
+        10% {
+          opacity: 1;
+        }
+        90% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0;
+          transform: scale3d(var(--end-scale, 1.3), var(--end-scale, 1.3), 1) 
+                     translate3d(var(--end-x, 0%), var(--end-y, 0%), 0);
+        }
+      }
+
+      /* Fast zoom out - starts quickly then slows down */
+      @keyframes ken-burns-zoom-out-fast {
+        0% {
+          opacity: 0;
+          transform: scale3d(var(--start-scale, 2.0), var(--start-scale, 2.0), 1) 
+                     translate3d(var(--start-x, 0%), var(--start-y, 0%), 0);
+        }
+        10% {
+          opacity: 1;
+        }
+        30% {
+          transform: scale3d(var(--mid-scale, 1.2), var(--mid-scale, 1.2), 1) 
+                     translate3d(var(--mid-x, 0%), var(--mid-y, 0%), 0);
+        }
+        90% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0;
+          transform: scale3d(1.0, 1.0, 1) translate3d(0%, 0%, 0);
+        }
+      }
     `;
     
     const styleElement = document.createElement('style');
-    styleElement.id = 'ken-burns-static';
-    styleElement.textContent = staticKeyframes;
+    styleElement.id = 'ken-burns-keyframes';
+    styleElement.textContent = keyframeStyles;
     document.head.appendChild(styleElement);
   },
 
@@ -547,13 +606,13 @@ createStaticBackdropKeyframes: function(): void {
           cropY = Math.max(20, Math.min(80, cropY));
           
           console.log(`[MMM-OneDrive] Using face-detected focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
-          this.applyKenBurnsAnimation(current, cropX, cropY, target, focalPoint);
+          this.applyKenBurnsAnimation(current, cropX, cropY, target, focalPoint, visionResults);
         } else {
           console.warn(`[MMM-OneDrive] Missing image dimensions for focal point conversion, using random`);
           // Fallback to random if no image dimensions
           const cropX = Math.random() * 60 + 20;
           const cropY = Math.random() * 60 + 20;
-          this.applyKenBurnsAnimation(current, cropX, cropY, target);
+          this.applyKenBurnsAnimation(current, cropX, cropY, target, focalPoint, visionResults);
         }
       } else {
         // Generate random crop position for Ken Burns effect (fallback)
@@ -561,7 +620,7 @@ createStaticBackdropKeyframes: function(): void {
         const cropY = Math.random() * 60 + 20; // 20% to 80% (avoid edges)
         
         console.log(`[MMM-OneDrive] Using random focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
-        this.applyKenBurnsAnimation(current, cropX, cropY, target);
+        this.applyKenBurnsAnimation(current, cropX, cropY, target, null, visionResults);
       }
     } else {
       // Ken Burns disabled - use normal fade animation
@@ -574,13 +633,25 @@ createStaticBackdropKeyframes: function(): void {
 
   },
 
-  applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, focalPoint?: any): void {
-    const totalDuration = (this.config.updateInterval/1000); 
-    this.applyCSSKenBurns(current, cropX, cropY, target, totalDuration, focalPoint);
+  // ==================== MAIN ANIMATION LOGIC ====================
+
+  applyKenBurnsAnimation: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, focalPoint?: any, visionResults?: any): void {
+    const totalDuration = (this.config.updateInterval/1000);
+    
+    // Use animation type from backend if available, otherwise fall back to default
+    const animationType = visionResults?.animationType || 'zoom_out'; // Default fallback
+    const animationReason = visionResults?.animationReason || 'no_backend_data';
+    
+    console.log(`[MMM-OneDrive] 🎬 Using backend animation decision: ${animationType} (${animationReason}) for ${target.filename}`);
+    
+    this.applyCSSKenBurns(current, cropX, cropY, target, totalDuration, focalPoint, {
+      type: animationType,
+      reason: animationReason
+    });
   },
 
   // CSS keyframes implementation for IMG elements - optimized for Pi performance
-  applyCSSKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any): void {
+  applyCSSKenBurns: function(current: HTMLElement, cropX: number, cropY: number, target: OneDriveMediaItem, totalDuration: number, focalPoint?: any, animationType?: any): void {
     // Create the CSS keyframes first
     this.createStaticKenBurnsKeyframes();
     
@@ -591,48 +662,6 @@ createStaticBackdropKeyframes: function(): void {
     // We're using IMG elements - get the img element to animate
     const imgElement = current.querySelector('img') as HTMLImageElement;
     
-    // Calculate optimal starting scale based on focal point rectangle
-    let startScale = 1.5; // Default fallback
-    
-    if (focalPoint && imageWidth && imageHeight) {
-      // Calculate focal point dimensions as percentages of image
-      const focalWidthPercent = (focalPoint.width / imageWidth) * 100;
-      const focalHeightPercent = (focalPoint.height / imageHeight) * 100;
-      
-      // Calculate required scale to make focal point fit the screen
-      const scaleForWidth = 100 / focalWidthPercent;
-      const scaleForHeight = 100 / focalHeightPercent;
-      
-      // Use the smaller scale to ensure both dimensions fit
-      const optimalScale = Math.min(scaleForWidth, scaleForHeight);
-      
-      // Clamp the scale to reasonable bounds (1.1x to 2.5x to prevent memory issues)
-      startScale = Math.max(1.1, Math.min(2.5, optimalScale));
-      
-      console.debug("[MMM-OneDrive] Focal point scale calculation:", {
-        focalWidthPercent: focalWidthPercent.toFixed(1),
-        focalHeightPercent: focalHeightPercent.toFixed(1),
-        finalStartScale: startScale.toFixed(2)
-      });
-    }
-
-    // Calculate pan offsets to center the focal point at start
-    let startTranslateX = 0;
-    let startTranslateY = 0;
-    
-    if (focalPoint && this.config.kenBurnsCenterStart !== false) {
-      imgElement.style.transformOrigin = 'center center';
-      
-      // For IMG elements with object-fit: contain
-      startTranslateX = 50 - cropX;
-      startTranslateY = 50 - cropY;
-      
-      console.debug("[MMM-OneDrive] Pan calculation:", {
-        focalCenter: `${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`,
-        translation: `${startTranslateX.toFixed(1)}%, ${startTranslateY.toFixed(1)}%`
-      });
-    }
-
     // Cancel any existing animation
     if (current.kenBurnsAnimation) {
       current.kenBurnsAnimation.cancel();
@@ -649,14 +678,39 @@ createStaticBackdropKeyframes: function(): void {
     imgElement.style.willChange = 'transform, opacity';
     imgElement.style.backfaceVisibility = 'hidden';
     imgElement.style.transformStyle = 'preserve-3d';
+    imgElement.style.transformOrigin = 'center center';
 
-    // Set CSS custom properties for keyframes
-    imgElement.style.setProperty('--start-scale', startScale.toString());
-    imgElement.style.setProperty('--start-x', `${startTranslateX}%`);
-    imgElement.style.setProperty('--start-y', `${startTranslateY}%`);
-    
-    // Apply the CSS animation
-    imgElement.style.animation = `ken-burns-static ${totalDuration}s linear forwards`;
+    // Handle different animation types
+    switch (animationType?.type || 'static') {
+      case 'static':
+        // Static animation - just fade in/out, no movement
+        imgElement.style.animation = `ken-burns-static ${totalDuration}s linear forwards`;
+        console.debug(`[MMM-OneDrive] Applied static animation (${animationType.reason})`);
+        break;
+        
+      case 'zoom_out':
+        // Zoom out - start zoomed in, end at natural size
+        this.applyZoomOutAnimation(imgElement, cropX, cropY, focalPoint, totalDuration, imageWidth, imageHeight, false);
+        console.debug(`[MMM-OneDrive] Applied zoom out animation (${animationType.reason})`);
+        break;
+        
+      case 'zoom_out_fast':
+        // Fast zoom out - starts quickly then slows down
+        this.applyZoomOutAnimation(imgElement, cropX, cropY, focalPoint, totalDuration, imageWidth, imageHeight, true);
+        console.debug(`[MMM-OneDrive] Applied fast zoom out animation (${animationType.reason})`);
+        break;
+        
+      case 'zoom_in':
+        // Zoom in - start at natural size, end zoomed in
+        this.applyZoomInAnimation(imgElement, cropX, cropY, focalPoint, totalDuration, imageWidth, imageHeight);
+        console.debug(`[MMM-OneDrive] Applied zoom in animation (${animationType.reason})`);
+        break;
+        
+      default:
+        // Fallback to static
+        imgElement.style.animation = `ken-burns-static ${totalDuration}s linear forwards`;
+        console.warn(`[MMM-OneDrive] Unknown animation type: ${animationType?.type}, using static`);
+    }
 
     // Store a reference for cleanup (create a fake Animation object for compatibility)
     const fakeAnimation = {
@@ -665,15 +719,110 @@ createStaticBackdropKeyframes: function(): void {
         imgElement.style.removeProperty('--start-scale');
         imgElement.style.removeProperty('--start-x');
         imgElement.style.removeProperty('--start-y');
+        imgElement.style.removeProperty('--end-scale');
+        imgElement.style.removeProperty('--end-x');
+        imgElement.style.removeProperty('--end-y');
+        imgElement.style.removeProperty('--mid-scale');
+        imgElement.style.removeProperty('--mid-x');
+        imgElement.style.removeProperty('--mid-y');
       }
     };
     current.kenBurnsAnimation = fakeAnimation as Animation;
 
     console.debug("[MMM-OneDrive] CSS Ken Burns animation started:", { 
+      animationType: animationType?.type || 'static',
       totalDuration: `${totalDuration}s`,
       filename: target.filename,
       hasFocalPoint: !!focalPoint
     });
+  },
+
+  /**
+   * Apply zoom out animation parameters
+   */
+  applyZoomOutAnimation: function(imgElement: HTMLImageElement, cropX: number, cropY: number, focalPoint?: any, totalDuration?: number, imageWidth?: number, imageHeight?: number, isFast?: boolean): void {
+    let startScale = 1.5; // Default
+    let startTranslateX = 0;
+    let startTranslateY = 0;
+    
+    // For fast zoom out, use larger starting scale
+    if (isFast) {
+      startScale = 2.0;
+    }
+    
+    // Calculate optimal starting scale based on focal point rectangle
+    if (focalPoint && imageWidth && imageHeight) {
+      const focalWidthPercent = (focalPoint.width / imageWidth) * 100;
+      const focalHeightPercent = (focalPoint.height / imageHeight) * 100;
+      
+      const scaleForWidth = 100 / focalWidthPercent;
+      const scaleForHeight = 100 / focalHeightPercent;
+      const optimalScale = Math.min(scaleForWidth, scaleForHeight);
+      
+      // For fast zoom out, increase the starting scale even more
+      const scaleMultiplier = isFast ? 1.3 : 1.0;
+      startScale = Math.max(1.1, Math.min(2.5, optimalScale * scaleMultiplier));
+      
+      // Calculate pan to center focal point
+      if (this.config.kenBurnsCenterStart !== false) {
+        startTranslateX = 50 - cropX;
+        startTranslateY = 50 - cropY;
+      }
+    }
+    
+    // Set CSS custom properties
+    imgElement.style.setProperty('--start-scale', startScale.toString());
+    imgElement.style.setProperty('--start-x', `${startTranslateX}%`);
+    imgElement.style.setProperty('--start-y', `${startTranslateY}%`);
+    
+    // For fast zoom out, set mid-point properties
+    if (isFast) {
+      const midScale = 1.0 + (startScale - 1.0) * 0.3; // 30% of the way to final scale
+      const midTranslateX = startTranslateX * 0.3; // 30% of the way to final position
+      const midTranslateY = startTranslateY * 0.3;
+      
+      imgElement.style.setProperty('--mid-scale', midScale.toString());
+      imgElement.style.setProperty('--mid-x', `${midTranslateX}%`);
+      imgElement.style.setProperty('--mid-y', `${midTranslateY}%`);
+      
+      imgElement.style.animation = `ken-burns-zoom-out-fast ${totalDuration}s ease-out forwards`;
+    } else {
+      imgElement.style.animation = `ken-burns-zoom-out ${totalDuration}s linear forwards`;
+    }
+  },
+
+  /**
+   * Apply zoom in animation parameters  
+   */
+  applyZoomInAnimation: function(imgElement: HTMLImageElement, cropX: number, cropY: number, focalPoint?: any, totalDuration?: number, imageWidth?: number, imageHeight?: number): void {
+    let endScale = 1.3; // Conservative zoom in
+    let endTranslateX = 0;
+    let endTranslateY = 0;
+    
+    // Calculate optimal ending scale and position based on focal point
+    if (focalPoint && imageWidth && imageHeight) {
+      const focalWidthPercent = (focalPoint.width / imageWidth) * 100;
+      const focalHeightPercent = (focalPoint.height / imageHeight) * 100;
+      
+      const scaleForWidth = 80 / focalWidthPercent; // Show 80% of focal area
+      const scaleForHeight = 80 / focalHeightPercent;
+      const optimalScale = Math.min(scaleForWidth, scaleForHeight);
+      
+      endScale = Math.max(1.1, Math.min(2.0, optimalScale)); // More conservative for zoom in
+      
+      // Calculate pan to center focal point at end
+      if (this.config.kenBurnsCenterStart !== false) {
+        endTranslateX = 50 - cropX;
+        endTranslateY = 50 - cropY;
+      }
+    }
+    
+    // Set CSS custom properties
+    imgElement.style.setProperty('--end-scale', endScale.toString());
+    imgElement.style.setProperty('--end-x', `${endTranslateX}%`);
+    imgElement.style.setProperty('--end-y', `${endTranslateY}%`);
+    
+    imgElement.style.animation = `ken-burns-zoom-in ${totalDuration}s linear forwards`;
   },
 
   applyCommonStyling: function(current: HTMLElement, target: OneDriveMediaItem, album: DriveItem, startDt: Date, kenBurnsActive?: boolean, visionResults?: any): void {
