@@ -348,6 +348,10 @@ Module.register<Config>("MMM-OneDrive", {
         displayUrl = url;
       }
     } else {
+      if (this.currentDebugBlobUrl) {
+        URL.revokeObjectURL(this.currentDebugBlobUrl);
+        this.currentDebugBlobUrl = null;
+      }
       console.debug("[MMM-OneDrive] ℹ️ No debug image buffer found, using main image");
     }
     
@@ -524,6 +528,7 @@ createStaticBackdropKeyframes: function(): void {
     const back = document.getElementById("ONEDRIVE_PHOTO_BACKDROP");
     const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
     current.textContent = "";
+    back.style.backgroundImage = "";
     
     // Using IMG elements with CSS animations for best Pi performance
     back.style.backgroundImage = `url(${url})`; // Keep backdrop as background for blur effect

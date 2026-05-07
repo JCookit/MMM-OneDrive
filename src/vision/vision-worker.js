@@ -368,7 +368,7 @@ class VisionWorker {
       preprocessedImage = await this.preprocessImageBuffer(imageBuffer, filename);
       
       // Configuration for detection
-      const faceDetectionEnabled = true; //this.config?.faceDetection?.enabled !== false;
+      const faceDetectionEnabled = this.config?.faceDetection?.enabled !== false;
       const interestDetectionEnabled = true; // Always enabled for fallback
       const colorAnalysisEnabled = true; // Always enabled for theming
       

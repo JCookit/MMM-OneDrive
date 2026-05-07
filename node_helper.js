@@ -143,6 +143,10 @@ const reverseGeocode = async (latitude, longitude) => {
 const ONE_DAY = 24 * 60 * 60 * 1000; // 1 day in milliseconds
 const DEFAULT_SCAN_INTERVAL = 1000 * 60 * 55;
 const MINIMUM_SCAN_INTERVAL = 1000 * 60 * 10;
+const DEFAULT_VISION_TIMEOUT_MS = 5000;
+const DEFAULT_VISION_HEALTH_TIMEOUT_MS = 2000;
+const VISION_HEALTH_INTERVAL_MS = 30000;
+const MEMORY_TELEMETRY_INTERVAL = 10;
 
 /**
  * Canvas-based image resizing
@@ -264,6 +268,29 @@ function logMemoryUsage(context = '') {
   return { heapMB, externalMB, totalMB };
 }
 
+function createStaticVisionFallback(method, extra = {}) {
+  return {
+    focalPoint: null,
+    method,
+    animationType: 'static',
+    animationReason: method,
+    colorAnalysis: null,
+    debugImageBuffer: null,
+    visionFallback: true,
+    ...extra
+  };
+}
+
+function formatMemoryUsage(usage) {
+  return {
+    rssMB: Math.round(usage.rss / 1024 / 1024),
+    heapUsedMB: Math.round(usage.heapUsed / 1024 / 1024),
+    heapTotalMB: Math.round(usage.heapTotal / 1024 / 1024),
+    externalMB: Math.round(usage.external / 1024 / 1024),
+    arrayBuffersMB: Math.round((usage.arrayBuffers || 0) / 1024 / 1024)
+  };
+}
+
 /**
  * @type {OneDrivePhotos}
  */
@@ -280,6 +307,9 @@ const nodeHelperObject = {
   visionWorkerReady: false,
   visionRequestId: 0,
   visionRequests: new Map(),
+  visionWorkerRestarting: false,
+  visionWorkerBusy: false,
+  photosProcessedSinceTelemetry: 0,
   start: function () {
     this.log_info("Starting module helper");
     this.config = {};
@@ -292,6 +322,13 @@ const nodeHelperObject = {
     this.photoRefreshPointer = 0;
     this.queue = null;
     this.initializeTimer = null;
+    this.visionWorker = null;
+    this.visionWorkerReady = false;
+    this.visionWorkerRestarting = false;
+    this.visionWorkerBusy = false;
+    this.visionRequests = new Map();
+    this.visionRequestId = 0;
+    this.photosProcessedSinceTelemetry = 0;
     
     // Track previous animation type for variety
     this.previousAnimationType = 'static'; // Default to static for first photo
@@ -454,20 +491,38 @@ const nodeHelperObject = {
   // ==================== VISION WORKER PROCESS MANAGEMENT ====================
 
   initializeVisionWorker: function() {
+    if (this.visionWorkerRestarting) {
+      console.log("[NodeHelper] Vision worker restart already in progress");
+      return;
+    }
+
+    if (this.visionWorker && this.isVisionWorkerAlive()) {
+      console.log(`[NodeHelper] Vision worker already running with PID ${this.visionWorker.pid}`);
+      return;
+    }
+
     console.log("[NodeHelper] Initializing vision worker process with reduced CPU priority...");
+    this.visionWorkerRestarting = true;
     
     const workerPath = path.join(__dirname, 'src/vision/vision-worker.js');
     
     // Use nice command to spawn the worker with lower CPU priority
     // nice +10 = lower priority, giving UI thread higher priority for smooth animations
-    this.visionWorker = spawn('nice', [
-      '-n', '10',  // Set nice level to +10 (lower CPU priority)
-      'node',
-      '--max-old-space-size=512',  // 512MB memory limit for worker
-      workerPath
-    ], {
-      stdio: ['pipe', 'pipe', 'pipe', 'ipc']
-    });
+    try {
+      this.visionWorker = spawn('nice', [
+        '-n', '10',  // Set nice level to +10 (lower CPU priority)
+        'node',
+        '--max-old-space-size=512',  // 512MB memory limit for worker
+        workerPath
+      ], {
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc']
+      });
+    } catch (error) {
+      this.visionWorkerRestarting = false;
+      this.visionWorkerReady = false;
+      console.error(`[NodeHelper] Failed to spawn vision worker: ${error.message}`);
+      return;
+    }
 
     // Forward worker stdout to main process (for unified logging)
     this.visionWorker.stdout.on('data', (data) => {
@@ -500,10 +555,13 @@ const nodeHelperObject = {
     this.visionWorker.on('exit', (code, signal) => {
       console.error(`[NodeHelper] Vision worker exited: code=${code}, signal=${signal}`);
       this.visionWorkerReady = false;
+      this.visionWorkerBusy = false;
+      this.rejectAllVisionRequests(new Error(`Vision worker exited: code=${code}, signal=${signal}`));
       
       if (code !== 0 && !this.shuttingDown) {
         console.log("[NodeHelper] Restarting vision worker in 3 seconds...");
         setTimeout(() => {
+          this.visionWorker = null;
           this.initializeVisionWorker();
         }, 3000);
       }
@@ -513,9 +571,12 @@ const nodeHelperObject = {
     this.visionWorker.on('error', (error) => {
       console.error("[NodeHelper] Vision worker process error:", error.message);
       this.visionWorkerReady = false;
+      this.visionWorkerBusy = false;
+      this.rejectAllVisionRequests(error);
     });
 
     console.log(`[NodeHelper] Vision worker process spawned with PID: ${this.visionWorker.pid} (nice +10 priority)`);
+    this.visionWorkerRestarting = false;
     
     // Set up periodic health check to detect dead workers
     this.startVisionWorkerHealthCheck();
@@ -532,8 +593,12 @@ const nodeHelperObject = {
 
     console.log("Starting vision process health check");
     
-    // Check worker health every 10 seconds
-    this.visionWorkerHealthCheckInterval = setInterval(() => {
+    // Check worker health periodically. Skip while a request is active; the request timeout owns recovery.
+    this.visionWorkerHealthCheckInterval = setInterval(async () => {
+      if (this.visionWorkerBusy) {
+        return;
+      }
+
       if (!this.visionWorkerReady || !this.isVisionWorkerAlive()) {
         console.warn("[NodeHelper] Vision worker health check failed - process is dead");
         this.visionWorkerReady = false;
@@ -545,8 +610,20 @@ const nodeHelperObject = {
         setTimeout(() => {
           this.initializeVisionWorker();
         }, 1000);
+        return;
       }
-    }, 10000); // Check every 10 seconds
+
+      try {
+        await this.sendVisionWorkerMessage(
+          { type: 'HEALTH_CHECK' },
+          DEFAULT_VISION_HEALTH_TIMEOUT_MS,
+          { healthCheck: true }
+        );
+      } catch (error) {
+        console.warn(`[NodeHelper] Vision worker IPC health check failed: ${error.message}`);
+        this.restartVisionWorker(`health_check_failed: ${error.message}`);
+      }
+    }, VISION_HEALTH_INTERVAL_MS);
   },
 
   /**
@@ -626,6 +703,16 @@ const nodeHelperObject = {
     }
   },
 
+  rejectAllVisionRequests: function(error) {
+    for (const [requestId, request] of this.visionRequests.entries()) {
+      if (request.timeout) {
+        clearTimeout(request.timeout);
+      }
+      request.reject(error);
+      this.visionRequests.delete(requestId);
+    }
+  },
+
   /**
    * Check if the vision worker process is actually alive
    * @returns {boolean} True if worker process is running
@@ -651,7 +738,7 @@ const nodeHelperObject = {
     }
   },
 
-  sendVisionWorkerMessage: function(message, timeoutMs = 30000) {
+  sendVisionWorkerMessage: function(message, timeoutMs = DEFAULT_VISION_TIMEOUT_MS, options = {}) {
     return new Promise((resolve, reject) => {
       // Check both the ready flag AND that the process is actually alive
       if (!this.visionWorker || !this.visionWorkerReady || !this.isVisionWorkerAlive()) {
@@ -667,28 +754,100 @@ const nodeHelperObject = {
         reject(new Error('Vision worker not available'));
         return;
       }
+
+      if (!options.healthCheck && this.visionWorkerBusy) {
+        reject(new Error('Vision worker busy'));
+        return;
+      }
       
       const requestId = ++this.visionRequestId;
       message.requestId = requestId;
+      const requestType = message.type;
+      if (!options.healthCheck) {
+        this.visionWorkerBusy = true;
+      }
       
       // Set up timeout
       const timeout = setTimeout(() => {
         this.visionRequests.delete(requestId);
-        reject(new Error(`Vision worker timeout after ${timeoutMs}ms`));
+        if (!options.healthCheck) {
+          this.visionWorkerBusy = false;
+        }
+        const error = new Error(`Vision worker timeout after ${timeoutMs}ms`);
+        error.requestId = requestId;
+        error.requestType = requestType;
+        reject(error);
+        if (!options.healthCheck) {
+          this.restartVisionWorker(`request_timeout:${requestType}:${requestId}`);
+        }
       }, timeoutMs);
       
       // Store request
-      this.visionRequests.set(requestId, { resolve, reject, timeout });
+      this.visionRequests.set(requestId, {
+        resolve: (response) => {
+          if (!options.healthCheck) {
+            this.visionWorkerBusy = false;
+          }
+          resolve(response);
+        },
+        reject: (error) => {
+          if (!options.healthCheck) {
+            this.visionWorkerBusy = false;
+          }
+          reject(error);
+        },
+        timeout
+      });
       
       // Send message to worker
-      this.visionWorker.send(message);
+      try {
+        this.visionWorker.send(message);
+      } catch (error) {
+        clearTimeout(timeout);
+        this.visionRequests.delete(requestId);
+        if (!options.healthCheck) {
+          this.visionWorkerBusy = false;
+        }
+        reject(error);
+      }
     });
+  },
+
+  restartVisionWorker: function(reason) {
+    if (this.shuttingDown || this.visionWorkerRestarting) {
+      return;
+    }
+
+    console.warn(`[NodeHelper] Restarting vision worker: ${reason}`);
+    this.visionWorkerReady = false;
+    this.visionWorkerBusy = false;
+    this.visionWorkerRestarting = true;
+    this.rejectAllVisionRequests(new Error(`Vision worker restarting: ${reason}`));
+
+    const worker = this.visionWorker;
+    this.visionWorker = null;
+
+    if (worker && !worker.killed) {
+      try {
+        worker.kill('SIGTERM');
+      } catch (error) {
+        console.warn(`[NodeHelper] Could not terminate vision worker: ${error.message}`);
+      }
+    }
+
+    setTimeout(() => {
+      this.visionWorkerRestarting = false;
+      this.initializeVisionWorker();
+    }, 1000);
   },
 
   shutdownVisionWorker: function() {
     if (this.visionWorker) {
       console.log("[NodeHelper] Shutting down vision worker...");
       this.shuttingDown = true;
+      this.visionWorkerReady = false;
+      this.visionWorkerBusy = false;
+      this.rejectAllVisionRequests(new Error('Vision worker shutting down'));
       
       // Stop health checking
       this.stopVisionWorkerHealthCheck();
@@ -1202,7 +1361,7 @@ const nodeHelperObject = {
       } else if (photo._visionResults.error && !photo._visionResults.shouldRetry) {
         console.log(`[NodeHelper] ❌ Using cached permanent error result`);
         // Use cached error result (don't retry permanent errors)
-        return await createCenterFallback(imageBuffer, photo._visionResults.errorReason || 'cached_error');
+        return createStaticVisionFallback(photo._visionResults.errorReason || 'cached_error');
       } else {
         console.log(`[NodeHelper] ✅ Using cached vision detection results - recomputing focal point selection`);
         // Use cached raw detection results but recompute focal point selection
@@ -1247,7 +1406,7 @@ const nodeHelperObject = {
             faceDetection: { enabled: faceDetectionEnabled },
             debugMode: this.config?.faceDetection?.debugMode || false
           }
-        });
+        }, this.getVisionTimeoutMs());
         
         if (response.type === 'PROCESSING_RESULT') {
           const { result, processingTime } = response;
@@ -1261,9 +1420,11 @@ const nodeHelperObject = {
           // Check if worker returned an error
           if (result.error) {
             console.log(`[NodeHelper] ⚠️ Vision worker returned error: ${result.error}`);
-            console.log(`[NodeHelper] Using center fallback instead`);
+            console.log(`[NodeHelper] Using static fallback instead`);
             
-            visionResult = await createCenterFallback(imageBuffer, 'worker_error');
+            visionResult = createStaticVisionFallback('worker_error', {
+              errorMessage: result.error
+            });
             
             // Cache this error result but mark for retry (transient error)
             if (photo) {
@@ -1321,8 +1482,8 @@ const nodeHelperObject = {
           throw new Error(`Unexpected vision worker response: ${response.type}`);
         }
       } else {
-        console.warn("[NodeHelper] Vision worker not ready, using fallback processing...");
-        visionResult = await createCenterFallback(imageBuffer, 'worker_not_ready');
+        console.warn("[NodeHelper] Vision worker not ready, using static fallback");
+        visionResult = createStaticVisionFallback('worker_not_ready');
         
         // Cache this fallback result but mark for retry (worker might come online later)
         if (photo) {
@@ -1348,10 +1509,12 @@ const nodeHelperObject = {
       
     } catch (error) {
       console.error(`[NodeHelper] ❌ Vision processing failed for ${filename || 'unknown'}:`, error.message);
-      console.log(`[NodeHelper] Using center fallback due to error`);
+      console.log(`[NodeHelper] Using static fallback due to vision error`);
       
-      // Return center fallback on any error
-      visionResult = await createCenterFallback(imageBuffer, 'error_fallback');
+      // Return static fallback on any error so photo display is not blocked by vision recovery.
+      visionResult = createStaticVisionFallback('vision_error_fallback', {
+        errorMessage: error.message
+      });
       
       // Cache this error result but mark for retry (errors might be transient)
       if (photo) {
@@ -1375,6 +1538,35 @@ const nodeHelperObject = {
       
       return visionResult;
     }
+  },
+
+  getVisionTimeoutMs: function() {
+    const configured = Number(this.config?.faceDetection?.timeoutMs || this.config?.visionTimeoutMs);
+    if (Number.isFinite(configured) && configured > 0) {
+      return Math.max(500, configured);
+    }
+
+    const updateInterval = Number(this.config?.updateInterval);
+    if (Number.isFinite(updateInterval) && updateInterval > 0) {
+      return Math.max(1000, Math.min(DEFAULT_VISION_TIMEOUT_MS, Math.floor(updateInterval / 3)));
+    }
+
+    return DEFAULT_VISION_TIMEOUT_MS;
+  },
+
+  logProcessTelemetry: function(context, extra = {}) {
+    const memory = formatMemoryUsage(process.memoryUsage());
+    const workerPid = this.visionWorker?.pid || null;
+    const workerReady = this.visionWorkerReady;
+    const pendingVisionRequests = this.visionRequests?.size || 0;
+    console.log(`[NodeHelper] 📊 Telemetry ${context}:`, {
+      memory,
+      workerPid,
+      workerReady,
+      workerBusy: this.visionWorkerBusy,
+      pendingVisionRequests,
+      ...extra
+    });
   },
 
 
@@ -1642,6 +1834,14 @@ const nodeHelperObject = {
       
       const processingTime = Date.now() - startTime;
       console.log(`[NodeHelper] ✅ Photo processed successfully in ${processingTime}ms`);
+      this.photosProcessedSinceTelemetry++;
+      if (this.photosProcessedSinceTelemetry >= MEMORY_TELEMETRY_INTERVAL) {
+        this.photosProcessedSinceTelemetry = 0;
+        this.logProcessTelemetry(`after ${MEMORY_TELEMETRY_INTERVAL} photos`, {
+          currentIndex: this.uiPhotoIndex,
+          totalPhotos: this.localPhotoList.length
+        });
+      }
       
     } catch (error) {
       console.error("[NodeHelper] ❌ Error processing photo:", error);
@@ -1953,6 +2153,9 @@ const nodeHelperObject = {
         logMemoryUsage(`before vision processing ${photo.filename}`);
         interestingRectangleResult = await this.findInterestingRectangle(buffer, photo.filename);
         logMemoryUsage(`after vision processing ${photo.filename}`);
+        if (interestingRectangleResult?.visionFallback) {
+          console.warn(`[NodeHelper] Vision fallback for ${photo.filename}: ${interestingRectangleResult.method}`);
+        }
         
         // Debug image is now created by vision worker as binary buffer (if debugMode enabled)
         if (this.config?.faceDetection?.debugMode && interestingRectangleResult?.debugImageBuffer) {

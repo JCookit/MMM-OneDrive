@@ -1,7 +1,16 @@
 import { describe, expect, it, beforeEach, jest, afterEach } from "@jest/globals";
-import nodeHelperObj from "./node_helper.js";
 import logger from "./tests/logger.mock";
 import type { OneDriveMediaItem } from "./types/type";
+
+jest.mock("canvas", () => ({
+  createCanvas: jest.fn(() => ({
+    getContext: jest.fn(() => ({ drawImage: jest.fn() })),
+    toBuffer: jest.fn(() => Buffer.from("resized")),
+  })),
+  loadImage: jest.fn(() => Promise.resolve({ width: 1920, height: 1080 })),
+}), { virtual: true });
+
+import nodeHelperObj from "./node_helper.js";
 
 const createMockOneDrivePhotos = (num: number) => Array(num).fill({})
   .map((_, i) => ({
@@ -49,6 +58,15 @@ describe("nodeHelperObj", () => {
 
   afterEach(() => {
     jest.clearAllMocks();
+    jest.useRealTimers();
+    if (helper) {
+      helper.visionWorker = null;
+      helper.visionRequests?.clear();
+      if (helper.visionWorkerHealthCheckInterval) {
+        clearInterval(helper.visionWorkerHealthCheckInterval);
+        helper.visionWorkerHealthCheckInterval = null;
+      }
+    }
     helper?.stop();
     helper = null;
   });
@@ -124,6 +142,51 @@ describe("nodeHelperObj", () => {
       helper.photoRefreshPointer = 0;
       await helper.prepAndSendChunk(5);
       expect(logger.error).toHaveBeenCalledWith("[ONEDRIVE] [node_helper]", "couldn't send ", 0, " pics");
+    });
+  });
+
+  describe("vision worker resilience", () => {
+    it("uses a bounded default vision timeout based on updateInterval", () => {
+      helper.config = { updateInterval: 60000 };
+      expect(helper.getVisionTimeoutMs()).toBe(5000);
+
+      helper.config = { updateInterval: 9000 };
+      expect(helper.getVisionTimeoutMs()).toBe(3000);
+
+      helper.config = { updateInterval: 60000, faceDetection: { timeoutMs: 1200 } };
+      expect(helper.getVisionTimeoutMs()).toBe(1200);
+    });
+
+    it("rejects non-health requests while the worker is busy", async () => {
+      helper.visionWorkerReady = true;
+      helper.visionWorkerBusy = true;
+      helper.visionWorker = {
+        pid: 123,
+        send: jest.fn(),
+      } as any;
+      helper.isVisionWorkerAlive = jest.fn(() => true);
+
+      await expect(helper.sendVisionWorkerMessage({ type: "PROCESS_IMAGE" })).rejects.toThrow("Vision worker busy");
+    });
+
+    it("restarts the worker when a vision request times out", async () => {
+      jest.useFakeTimers();
+      helper.visionWorkerReady = true;
+      helper.visionWorkerBusy = false;
+      helper.visionWorker = {
+        pid: 123,
+        send: jest.fn(),
+      } as any;
+      helper.isVisionWorkerAlive = jest.fn(() => true);
+      helper.restartVisionWorker = jest.fn();
+
+      const promise = helper.sendVisionWorkerMessage({ type: "PROCESS_IMAGE" }, 1000);
+      jest.advanceTimersByTime(1000);
+
+      await expect(promise).rejects.toThrow("Vision worker timeout after 1000ms");
+      expect(helper.visionWorkerBusy).toBe(false);
+      expect(helper.restartVisionWorker).toHaveBeenCalledWith("request_timeout:PROCESS_IMAGE:1");
+      jest.useRealTimers();
     });
   });
 });
