@@ -26,7 +26,7 @@ const { fetchToUint8Array, FetchHTTPError } = require("./fetchItem-node");
 
 // Canvas for image resizing (more stable than Sharp for this use case)
 const { createCanvas, loadImage } = require('canvas');
-const ExifReader = require('exifreader');
+// ExifReader no longer needed here - canvas 3.x handles EXIF orientation automatically
 
 
 /**
@@ -145,8 +145,10 @@ const DEFAULT_SCAN_INTERVAL = 1000 * 60 * 55;
 const MINIMUM_SCAN_INTERVAL = 1000 * 60 * 10;
 
 /**
- * Canvas-based image resizing with EXIF rotation support
+ * Canvas-based image resizing
  * Stable alternative to Sharp that won't cause memory crashes
+ * Note: Canvas 3.x automatically applies EXIF orientation during loadImage(),
+ * so no manual rotation is needed. img.width/height are already correct.
  * @param {Buffer} imageBuffer - Original image buffer from fetchToUint8Array
  * @param {Object} photo - Photo metadata for logging and updating
  * @param {Object} config - Configuration with showWidth/showHeight
@@ -156,27 +158,12 @@ async function resizeImageCarefully(imageBuffer, photo, config) {
   try {
     const startMemory = process.memoryUsage();
     const { showWidth, showHeight } = config;
-    
-    // Parse EXIF data for orientation and dimensions
-    let orientation = 1;
-    
-    try {
-      const tags = ExifReader.load(imageBuffer);
-      orientation = tags.Orientation?.value || 1;
-      console.log(`[NodeHelper] 🔄 EXIF orientation: ${orientation}`);
-    } catch (exifError) {
-      console.log(`[NodeHelper] ⚠️ Could not read EXIF for ${photo.filename}, using defaults`);
-    }
-    
-    // Check if orientation requires 90-degree rotation
-    const needsRotation = [5, 6, 7, 8].includes(orientation);
 
-    // Load image into Canvas
+    // Load image into Canvas (canvas 3.x auto-applies EXIF orientation)
     const img = await loadImage(imageBuffer);
-    // get the original dimensions (in 'properly rotated' space); these are backwards if the photo needs rotation
-    const originalWidth = needsRotation ? img.height : img.width;
-    const originalHeight = needsRotation ? img.width : img.height;
-    console.log(`[NodeHelper] � Original ${photo.filename}: ${originalWidth}x${originalHeight} (${Math.round(imageBuffer.length / 1024)}KB)`);
+    const originalWidth = img.width;
+    const originalHeight = img.height;
+    console.log(`[NodeHelper] 🖼️ Original ${photo.filename}: ${originalWidth}x${originalHeight} (${Math.round(imageBuffer.length / 1024)}KB)`);
     
     // Calculate final output dimensions
     const { width: targetWidth, height: targetHeight } = calculateResizeDimensions(
@@ -185,21 +172,15 @@ async function resizeImageCarefully(imageBuffer, photo, config) {
     
     console.log(`[NodeHelper] 🎯 Target dimensions: ${targetWidth}x${targetHeight}`);
     
-    // Create final canvas for single-step composite transformation
+    // Create canvas and scale the already-correctly-oriented image
     const finalCanvas = createCanvas(targetWidth, targetHeight);
     const finalCtx = finalCanvas.getContext('2d');
-    
-    // Apply single-step composite transform that combines scaling and EXIF orientation
-    applySingleStepTransform(finalCtx, orientation, originalWidth, originalHeight, targetWidth, targetHeight);
-    
-    // Draw the image - the transform handles both resizing and rotation in one step
-    finalCtx.drawImage(img, 0, 0); 
+    finalCtx.drawImage(img, 0, 0, targetWidth, targetHeight);
     
     // Convert to JPEG buffer with high quality for vision processing
     const resized = finalCanvas.toBuffer('image/jpeg', { quality: 0.95 });
     
     console.log(`[NodeHelper] 📏 Final result ${photo.filename}: ${targetWidth}x${targetHeight} (${Math.round(resized.length / 1024)}KB)`);
-    console.log(`[NodeHelper] � Applied EXIF orientation: ${orientation}`);
     
     // Update photo metadata with the actual resized dimensions
     if (photo.mediaMetadata) {
@@ -257,53 +238,6 @@ function calculateResizeDimensions(originalWidth, originalHeight, maxWidth, maxH
   }
   
   return { width: targetWidth, height: targetHeight };
-}
-
-/**
- * Apply a single-step composite transformation that combines scaling and EXIF rotation
- * This is more efficient than the two-step approach and follows MDN best practices
- */
-function applySingleStepTransform(ctx, orientation, originalWidth, originalHeight, targetWidth, targetHeight) {
-  // Calculate scale factors
-  const scaleX = targetWidth / originalWidth;
-  const scaleY = targetHeight / originalHeight;
-  
-  // Calculate center points for rotation
-  const centerX = targetWidth / 2;
-  const centerY = targetHeight / 2;
-  
-  console.log(`[NodeHelper] Single-step transform: orientation=${orientation}, scale=(${scaleX.toFixed(3)}, ${scaleY.toFixed(3)}), center=(${centerX}, ${centerY})`);
-  
-  // Apply composite transformation based on EXIF orientation
-  switch (orientation) {
-    case 1: // Normal
-      ctx.transform(scaleX, 0, 0, scaleY, 0, 0);
-      break;
-    case 2: // Horizontal flip
-      ctx.transform(-scaleX, 0, 0, scaleY, targetWidth, 0);
-      break;
-    case 3: // 180° rotation
-      ctx.transform(-scaleX, 0, 0, -scaleY, targetWidth, targetHeight);
-      break;
-    case 4: // Vertical flip
-      ctx.transform(scaleX, 0, 0, -scaleY, 0, targetHeight);
-      break;
-    case 5: // Horizontal flip + 90° CCW
-      ctx.transform(0, -scaleY, scaleX, 0, 0, targetHeight);
-      break;
-    case 6: // 90° CW
-      ctx.transform(0, scaleY, -scaleX, 0, targetWidth, 0);
-      break;
-    case 7: // Horizontal flip + 90° CW
-      ctx.transform(0, -scaleY, -scaleX, 0, targetWidth, targetHeight);
-      break;
-    case 8: // 90° CCW
-      ctx.transform(0, -scaleY, scaleX, 0, 0, targetHeight);
-      break;
-    default:
-      console.warn(`[NodeHelper] Unknown EXIF orientation: ${orientation}`);
-      ctx.transform(scaleX, 0, 0, scaleY, 0, 0);
-  }
 }
 
 /**
@@ -1126,35 +1060,12 @@ const nodeHelperObject = {
     console.log(`[NodeHelper] 🎯 Choosing focal point from ${faces.length} faces and ${interestRegions.length} interest regions`);
 
     // Get image dimensions for animation rule calculations
+    // Canvas 3.x auto-applies EXIF orientation, so img.width/height are already correct
     let imageWidth, imageHeight;
     try {
-      // Use Canvas to get image dimensions (more reliable than Sharp for this use case)
       const img = await loadImage(imageBuffer);
-      let width = img.width;
-      let height = img.height;
-      
-      // Handle EXIF rotation - check if image needs to be rotated
-      try {
-        const exifData = ExifReader.load(imageBuffer);
-        const orientation = exifData.Orientation?.value;
-        
-        // EXIF orientations 6 and 8 require width/height swap
-        // 6 = Rotate 90 CW, 8 = Rotate 90 CCW
-        if (orientation === 6 || orientation === 8) {
-          console.debug(`[NodeHelper] EXIF rotation detected (${orientation}), swapping dimensions`);
-          imageWidth = height; // Swap for rotated images
-          imageHeight = width;
-        } else {
-          imageWidth = width;
-          imageHeight = height;
-        }
-      } catch (exifError) {
-        // If EXIF reading fails, use original dimensions
-        console.debug(`[NodeHelper] No EXIF data found or error reading EXIF, using original dimensions`);
-        imageWidth = width;
-        imageHeight = height;
-      }
-      
+      imageWidth = img.width;
+      imageHeight = img.height;
     } catch (error) {
       console.error('[NodeHelper] Failed to get image dimensions:', error);
       imageWidth = 1920; // Default fallback
