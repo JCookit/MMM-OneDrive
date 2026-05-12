@@ -24,8 +24,9 @@ const { cachePath } = require("./msal/authConfig.js");
 const { convertHEIC } = require("./photosConverter-node");
 const { fetchToUint8Array, FetchHTTPError } = require("./fetchItem-node");
 
-// Canvas for image resizing (more stable than Sharp for this use case)
+// Canvas and Sharp backends for image resizing.
 const { createCanvas, loadImage } = require('canvas');
+const sharp = require('sharp');
 // ExifReader no longer needed here - canvas 3.x handles EXIF orientation automatically
 
 
@@ -147,10 +148,47 @@ const DEFAULT_VISION_TIMEOUT_MS = 5000;
 const DEFAULT_VISION_HEALTH_TIMEOUT_MS = 2000;
 const VISION_HEALTH_INTERVAL_MS = 30000;
 const MEMORY_TELEMETRY_INTERVAL = 10;
+const DEFAULT_RESIZE_BACKEND = 'sharp';
+
+function getResizeConfig(config = {}) {
+  const resizeConfig = config.imageResize || {};
+  const backend = String(
+    resizeConfig.backend || config.resizeBackend || DEFAULT_RESIZE_BACKEND
+  ).toLowerCase();
+
+  return {
+    backend: backend === 'canvas' ? 'canvas' : 'sharp',
+    sharpCache: resizeConfig.sharpCache !== undefined ? resizeConfig.sharpCache !== false : false,
+    sharpConcurrency: Number.isFinite(Number(resizeConfig.sharpConcurrency))
+      ? Math.max(1, Math.floor(Number(resizeConfig.sharpConcurrency)))
+      : 1
+  };
+}
+
+function configureSharpForResize(config = {}) {
+  const resizeConfig = getResizeConfig(config);
+
+  if (!resizeConfig.sharpCache) {
+    sharp.cache(false);
+  }
+
+  sharp.concurrency(resizeConfig.sharpConcurrency);
+}
+
+function getOrientedSharpDimensions(metadata) {
+  const width = metadata?.width || 0;
+  const height = metadata?.height || 0;
+  const orientation = metadata?.orientation || 1;
+
+  if (orientation >= 5 && orientation <= 8) {
+    return { width: height, height: width };
+  }
+
+  return { width, height };
+}
 
 /**
- * Canvas-based image resizing
- * Stable alternative to Sharp that won't cause memory crashes
+ * Canvas-based image resizing.
  * Note: Canvas 3.x automatically applies EXIF orientation during loadImage(),
  * so no manual rotation is needed. img.width/height are already correct.
  * @param {Buffer} imageBuffer - Original image buffer from fetchToUint8Array
@@ -159,6 +197,16 @@ const MEMORY_TELEMETRY_INTERVAL = 10;
  * @returns {Promise<Buffer>} Resized image buffer as JPEG
  */
 async function resizeImageCarefully(imageBuffer, photo, config) {
+  const resizeConfig = getResizeConfig(config);
+
+  if (resizeConfig.backend === 'sharp') {
+    return resizeImageWithSharp(imageBuffer, photo, config);
+  }
+
+  return resizeImageWithCanvas(imageBuffer, photo, config);
+}
+
+async function resizeImageWithCanvas(imageBuffer, photo, config) {
   try {
     const startMemory = process.memoryUsage();
     const { showWidth, showHeight } = config;
@@ -202,6 +250,53 @@ async function resizeImageCarefully(imageBuffer, photo, config) {
     return resized;
   } catch (error) {
     console.error(`[NodeHelper] ❌ Failed to resize with canvas ${photo.filename}:`, error.message);
+    console.error(`[NodeHelper] ❌ Stack trace:`, error.stack);
+    throw error;
+  }
+}
+
+async function resizeImageWithSharp(imageBuffer, photo, config) {
+  try {
+    configureSharpForResize(config);
+
+    const { showWidth, showHeight } = config;
+    const image = sharp(imageBuffer, { failOn: 'none' }).rotate();
+    const metadata = await image.metadata();
+    const { width: originalWidth, height: originalHeight } = getOrientedSharpDimensions(metadata);
+
+    if (!originalWidth || !originalHeight) {
+      throw new Error('Sharp could not read image dimensions');
+    }
+
+    console.log(`[NodeHelper] 🖼️ Original ${photo.filename}: ${originalWidth}x${originalHeight} (${Math.round(imageBuffer.length / 1024)}KB)`);
+
+    const { width: targetWidth, height: targetHeight } = calculateResizeDimensions(
+      originalWidth, originalHeight, showWidth, showHeight
+    );
+
+    console.log(`[NodeHelper] 🎯 Target dimensions: ${targetWidth}x${targetHeight} using sharp`);
+
+    const resized = await image
+      .resize({
+        width: targetWidth,
+        height: targetHeight,
+        fit: 'inside',
+        withoutEnlargement: true
+      })
+      .jpeg({ quality: 95 })
+      .toBuffer();
+
+    console.log(`[NodeHelper] 📏 Final result ${photo.filename}: ${targetWidth}x${targetHeight} (${Math.round(resized.length / 1024)}KB)`);
+
+    if (photo.mediaMetadata) {
+      photo.mediaMetadata.width = targetWidth;
+      photo.mediaMetadata.height = targetHeight;
+      console.log(`[NodeHelper] 📊 Updated metadata: ${photo.filename} dimensions to ${targetWidth}x${targetHeight}`);
+    }
+
+    return resized;
+  } catch (error) {
+    console.error(`[NodeHelper] ❌ Failed to resize with sharp ${photo.filename}:`, error.message);
     console.error(`[NodeHelper] ❌ Stack trace:`, error.stack);
     throw error;
   }
@@ -381,7 +476,8 @@ function createPhotoPipelineTelemetry(photo, config) {
         currentIndex: photo?._indexOfPhotos,
         configuredSize: {
           showWidth: config?.showWidth || null,
-          showHeight: config?.showHeight || null
+          showHeight: config?.showHeight || null,
+          resizeBackend: getResizeConfig(config).backend
         },
         finalMemory: memory,
         totalDeltaMB: diffMemorySnapshots(memory, startMemory),
@@ -2241,7 +2337,8 @@ const nodeHelperObject = {
 
       // Carefully resize image based on showWidth/showHeight config (preserving format exactly)
       if (buffer && (this.config.showWidth || this.config.showHeight)) {
-        console.log(`[NodeHelper] 📏 Resizing ${photo.filename} from full resolution to fit ${this.config.showWidth}x${this.config.showHeight}`);
+        const resizeConfig = getResizeConfig(this.config);
+        console.log(`[NodeHelper] 📏 Resizing ${photo.filename} from full resolution to fit ${this.config.showWidth}x${this.config.showHeight} using ${resizeConfig.backend}`);
         logMemoryUsage(`before resizing ${photo.filename}`);
         try {
           const beforeResizeBytes = buffer.length;
@@ -2253,7 +2350,8 @@ const nodeHelperObject = {
             beforeResizeBytes,
             afterResizeBytes: buffer.length,
             outputWidth: photo.mediaMetadata?.width || null,
-            outputHeight: photo.mediaMetadata?.height || null
+            outputHeight: photo.mediaMetadata?.height || null,
+            resizeBackend: resizeConfig.backend
           });
         } catch (resizeError) {
           console.warn(`[NodeHelper] ⚠️ Failed to resize image, using original:`, resizeError.message);

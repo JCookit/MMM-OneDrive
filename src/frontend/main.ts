@@ -34,6 +34,11 @@ Module.register<Config>("MMM-OneDrive", {
     },
     showWidth: 1080, // These values will be used for quality of downloaded photos to show. real size to show in your MagicMirror region is recommended.
     showHeight: 1920,
+    imageResize: {
+      backend: "sharp", // "sharp" uses lower-memory native resizing; "canvas" is available as a rollback.
+      sharpCache: false,
+      sharpConcurrency: 1,
+    },
     timeFormat: "YYYY/MM/DD HH:mm",
     autoInfoPosition: false,
     forceAuthInteractive: false,

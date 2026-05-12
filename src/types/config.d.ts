@@ -18,6 +18,12 @@ export type Config = {
   };
   showWidth: number;
   showHeight: number;
+  imageResize?: {
+    backend?: "sharp" | "canvas";
+    sharpCache?: boolean;
+    sharpConcurrency?: number;
+  };
+  resizeBackend?: "sharp" | "canvas";
   timeFormat: string;
   forceAuthInteractive: boolean;
   autoInfoPosition: AutoInfoPositionFunction;
