@@ -282,12 +282,113 @@ function createStaticVisionFallback(method, extra = {}) {
 }
 
 function formatMemoryUsage(usage) {
+  const procMemory = readProcStatusMemory();
   return {
     rssMB: Math.round(usage.rss / 1024 / 1024),
     heapUsedMB: Math.round(usage.heapUsed / 1024 / 1024),
     heapTotalMB: Math.round(usage.heapTotal / 1024 / 1024),
     externalMB: Math.round(usage.external / 1024 / 1024),
-    arrayBuffersMB: Math.round((usage.arrayBuffers || 0) / 1024 / 1024)
+    arrayBuffersMB: Math.round((usage.arrayBuffers || 0) / 1024 / 1024),
+    ...procMemory
+  };
+}
+
+function readProcStatusMemory(pid = 'self') {
+  if (process.platform !== 'linux') {
+    return {};
+  }
+
+  try {
+    const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+    const wanted = new Map([
+      ['VmRSS', 'procVmRssMB'],
+      ['VmHWM', 'procVmHwmMB'],
+      ['RssAnon', 'procRssAnonMB'],
+      ['RssFile', 'procRssFileMB'],
+      ['RssShmem', 'procRssShmemMB'],
+      ['VmData', 'procVmDataMB'],
+      ['VmSwap', 'procVmSwapMB']
+    ]);
+    const parsed = {};
+
+    for (const line of status.split('\n')) {
+      const match = /^([A-Za-z_]+):\s+(\d+)\s+kB/.exec(line);
+      if (!match || !wanted.has(match[1])) {
+        continue;
+      }
+      parsed[wanted.get(match[1])] = Math.round(Number(match[2]) / 1024);
+    }
+
+    return parsed;
+  } catch (error) {
+    return {};
+  }
+}
+
+function getDetailedMemorySnapshot() {
+  return formatMemoryUsage(process.memoryUsage());
+}
+
+function diffMemorySnapshots(after, before) {
+  const fields = [
+    'rssMB',
+    'heapUsedMB',
+    'externalMB',
+    'arrayBuffersMB',
+    'procRssAnonMB',
+    'procRssFileMB',
+    'procRssShmemMB',
+    'procVmDataMB',
+    'procVmSwapMB'
+  ];
+  const diff = {};
+
+  for (const field of fields) {
+    if (Number.isFinite(after?.[field]) && Number.isFinite(before?.[field])) {
+      diff[field] = after[field] - before[field];
+    }
+  }
+
+  return diff;
+}
+
+function createPhotoPipelineTelemetry(photo, config) {
+  const startedAt = Date.now();
+  const startMemory = getDetailedMemorySnapshot();
+  let previousMemory = startMemory;
+  const stages = [];
+
+  return {
+    mark(stage, extra = {}) {
+      const memory = getDetailedMemorySnapshot();
+      stages.push({
+        stage,
+        elapsedMs: Date.now() - startedAt,
+        memory,
+        deltaFromStartMB: diffMemorySnapshots(memory, startMemory),
+        deltaFromPreviousMB: diffMemorySnapshots(memory, previousMemory),
+        ...extra
+      });
+      previousMemory = memory;
+    },
+    flush(outcome = 'ok', extra = {}) {
+      const memory = getDetailedMemorySnapshot();
+      console.log(`[NodeHelper] PIPELINE_TELEMETRY ${photo?.filename || photo?.id || 'unknown'}:`, {
+        outcome,
+        totalElapsedMs: Date.now() - startedAt,
+        filename: photo?.filename || null,
+        mimeType: photo?.mimeType || null,
+        currentIndex: photo?._indexOfPhotos,
+        configuredSize: {
+          showWidth: config?.showWidth || null,
+          showHeight: config?.showHeight || null
+        },
+        finalMemory: memory,
+        totalDeltaMB: diffMemorySnapshots(memory, startMemory),
+        stages,
+        ...extra
+      });
+    }
   };
 }
 
@@ -2071,6 +2172,12 @@ const nodeHelperObject = {
       return;
     }
     this.log_info("Loading to UI:", { id: photoId, filename: photo.filename });
+    const pipelineTelemetry = createPhotoPipelineTelemetry(photo, this.config);
+    pipelineTelemetry.mark('start', {
+      cachedVision: !!photo._visionResults,
+      cachedVisionError: !!photo._visionResults?.error,
+      cachedVisionShouldRetry: !!photo._visionResults?.shouldRetry
+    });
 
     if (photo?.baseUrlExpireDateTime) {
       const expireDt = new Date(photo.baseUrlExpireDateTime);
@@ -2080,6 +2187,9 @@ const nodeHelperObject = {
         photo.baseUrl = p.baseUrl;
         photo.baseUrlExpireDateTime = p.baseUrlExpireDateTime;
         this.log_info(`Image ${photo.filename} url refreshed new baseUrlExpireDateTime: ${photo.baseUrlExpireDateTime}`);
+        pipelineTelemetry.mark('url_refreshed', {
+          baseUrlExpireDateTime: photo.baseUrlExpireDateTime
+        });
       }
     }
 
@@ -2113,11 +2223,17 @@ const nodeHelperObject = {
       switch (photo.mimeType) {
         case "image/heic": {
           buffer = await convertHEIC({ id: photo.id, filename: photo.filename, url: photo.baseUrl });
+          pipelineTelemetry.mark('heic_converted', {
+            bufferBytes: buffer?.length || 0
+          });
           break;
         }
         default: {
           const buf = await fetchToUint8Array(photo.baseUrl);
           buffer = Buffer.from(buf);
+          pipelineTelemetry.mark('fetched', {
+            bufferBytes: buffer?.length || 0
+          });
           break;
         }
       }
@@ -2127,14 +2243,31 @@ const nodeHelperObject = {
         console.log(`[NodeHelper] 📏 Resizing ${photo.filename} from full resolution to fit ${this.config.showWidth}x${this.config.showHeight}`);
         logMemoryUsage(`before resizing ${photo.filename}`);
         try {
+          const beforeResizeBytes = buffer.length;
           const resizedBuffer = await resizeImageCarefully(buffer, photo, this.config);
           buffer = resizedBuffer;
           console.log(`[NodeHelper] ✅ Image resized to ${buffer.length} bytes`);
           logMemoryUsage(`after resizing ${photo.filename}`);
+          pipelineTelemetry.mark('resized', {
+            beforeResizeBytes,
+            afterResizeBytes: buffer.length,
+            outputWidth: photo.mediaMetadata?.width || null,
+            outputHeight: photo.mediaMetadata?.height || null
+          });
         } catch (resizeError) {
           console.warn(`[NodeHelper] ⚠️ Failed to resize image, using original:`, resizeError.message);
+          pipelineTelemetry.mark('resize_failed', {
+            errorMessage: resizeError.message,
+            bufferBytes: buffer?.length || 0
+          });
           // Continue with original buffer if resize fails
         }
+      } else {
+        pipelineTelemetry.mark('resize_skipped', {
+          bufferBytes: buffer?.length || 0,
+          showWidth: this.config.showWidth || null,
+          showHeight: this.config.showHeight || null
+        });
       }
 
       const album = this.selectedAlbums.find((a) => a.id === photo._albumId);
@@ -2153,6 +2286,11 @@ const nodeHelperObject = {
         logMemoryUsage(`before vision processing ${photo.filename}`);
         interestingRectangleResult = await this.findInterestingRectangle(buffer, photo.filename);
         logMemoryUsage(`after vision processing ${photo.filename}`);
+        pipelineTelemetry.mark('vision_complete', {
+          method: interestingRectangleResult?.method || 'none',
+          visionFallback: !!interestingRectangleResult?.visionFallback,
+          debugImageBufferBytes: interestingRectangleResult?.debugImageBuffer?.length || 0
+        });
         if (interestingRectangleResult?.visionFallback) {
           console.warn(`[NodeHelper] Vision fallback for ${photo.filename}: ${interestingRectangleResult.method}`);
         }
@@ -2163,6 +2301,11 @@ const nodeHelperObject = {
           console.log(`[NodeHelper] Debug image received from vision worker for ${photo.filename} (${interestingRectangleResult.debugImageBuffer.length} bytes)`);
           this.log_debug(`Debug image received for ${photo.filename} (binary buffer)`);
         }
+      } else {
+        pipelineTelemetry.mark('vision_skipped', {
+          kenBurnsEffect: this.config.kenBurnsEffect,
+          hasFilename: !!photo.filename
+        });
       }
 
       console.log(`[NodeHelper] 📤 Sending photo to frontend: ${photo.filename} (${buffer.length} bytes, ${photo.mimeType})`);
@@ -2185,6 +2328,10 @@ const nodeHelperObject = {
         errorMessage: null,
         interestingRectangleResult // Include face detection results
       });
+      pipelineTelemetry.mark('sent_to_frontend', {
+        photoBufferBytes: buffer?.length || 0,
+        mimeTypeSent: photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType
+      });
 
       // EXPLICITLY NULL LARGE OBJECTS
       buffer = null;
@@ -2193,8 +2340,14 @@ const nodeHelperObject = {
       }
       
       logMemoryUsage(`prepareShowPhoto complete for ${photo.filename}`);
+      pipelineTelemetry.flush('ok');
       
     } catch (err) {
+      pipelineTelemetry.mark('error', {
+        errorName: err?.name || null,
+        errorMessage: err?.message || String(err)
+      });
+      pipelineTelemetry.flush('error');
       this.sendSocketNotification("NO_PHOTO");  // prime the pump for the UX asking again
       if (err instanceof FetchHTTPError) {
         // silently skip the error

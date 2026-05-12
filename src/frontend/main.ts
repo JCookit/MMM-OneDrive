@@ -81,6 +81,13 @@ Module.register<Config>("MMM-OneDrive", {
     this.processingRequested = false;
     this.currentBlobUrl = null; // For blob URL cleanup
     this.currentDebugBlobUrl = null; // For debug image blob URL cleanup
+    this.blobDiagnostics = {
+      mainCreated: 0,
+      mainRevoked: 0,
+      debugCreated: 0,
+      debugRevoked: 0,
+      displays: 0,
+    };
 
     console.log("[MMM-OneDrive] Frontend initialized with caching system and blob URL management");
     this.sendSocketNotification("INIT", config);
@@ -313,10 +320,12 @@ Module.register<Config>("MMM-OneDrive", {
     // Convert raw buffer to Blob URL (more efficient than base64)
     const blob = new Blob([photoBuffer], { type: mimeType });
     const url = URL.createObjectURL(blob);
+    this.blobDiagnostics.mainCreated++;
     
     // Store blob URL for cleanup later
     if (this.currentBlobUrl) {
       URL.revokeObjectURL(this.currentBlobUrl);
+      this.blobDiagnostics.mainRevoked++;
     }
     this.currentBlobUrl = url;
     
@@ -330,10 +339,12 @@ Module.register<Config>("MMM-OneDrive", {
         // Convert debug image buffer to blob URL
         const debugBlob = new Blob([interestingRectangleResult.debugImageBuffer], { type: 'image/jpeg' });
         const debugBlobUrl = URL.createObjectURL(debugBlob);
+        this.blobDiagnostics.debugCreated++;
         
         // Clean up previous debug blob URL
         if (this.currentDebugBlobUrl) {
           URL.revokeObjectURL(this.currentDebugBlobUrl);
+          this.blobDiagnostics.debugRevoked++;
         }
         this.currentDebugBlobUrl = debugBlobUrl;
         
@@ -350,6 +361,7 @@ Module.register<Config>("MMM-OneDrive", {
     } else {
       if (this.currentDebugBlobUrl) {
         URL.revokeObjectURL(this.currentDebugBlobUrl);
+        this.blobDiagnostics.debugRevoked++;
         this.currentDebugBlobUrl = null;
       }
       console.debug("[MMM-OneDrive] ℹ️ No debug image buffer found, using main image");
@@ -358,6 +370,15 @@ Module.register<Config>("MMM-OneDrive", {
     console.debug(`[MMM-OneDrive] Display URL type: ${displayUrl.startsWith('blob:') ? 'blob' : 'other'}`);
     
     this.render(displayUrl, photo, album, interestingRectangleResult);
+    this.blobDiagnostics.displays++;
+    console.log("[MMM-OneDrive] BLOB_TELEMETRY:", {
+      filename: photo.filename,
+      photoBufferSize: photoBuffer?.length || 0,
+      displayUrlKind: displayUrl === url ? 'main' : 'debug',
+      activeMainBlobUrl: !!this.currentBlobUrl,
+      activeDebugBlobUrl: !!this.currentDebugBlobUrl,
+      ...this.blobDiagnostics,
+    });
     
     // Start next photo processing immediately after consuming cached photo
     this.requestNextPhoto();
