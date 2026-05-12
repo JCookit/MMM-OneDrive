@@ -373,7 +373,7 @@ function createPhotoPipelineTelemetry(photo, config) {
     },
     flush(outcome = 'ok', extra = {}) {
       const memory = getDetailedMemorySnapshot();
-      console.log(`[NodeHelper] PIPELINE_TELEMETRY ${photo?.filename || photo?.id || 'unknown'}:`, {
+      const telemetry = {
         outcome,
         totalElapsedMs: Date.now() - startedAt,
         filename: photo?.filename || null,
@@ -387,7 +387,8 @@ function createPhotoPipelineTelemetry(photo, config) {
         totalDeltaMB: diffMemorySnapshots(memory, startMemory),
         stages,
         ...extra
-      });
+      };
+      console.log(`[NodeHelper] PIPELINE_TELEMETRY ${photo?.filename || photo?.id || 'unknown'}: ${JSON.stringify(telemetry)}`);
     }
   };
 }

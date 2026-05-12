@@ -371,14 +371,14 @@ Module.register<Config>("MMM-OneDrive", {
     
     this.render(displayUrl, photo, album, interestingRectangleResult);
     this.blobDiagnostics.displays++;
-    console.log("[MMM-OneDrive] BLOB_TELEMETRY:", {
+    console.log("[MMM-OneDrive] BLOB_TELEMETRY:", JSON.stringify({
       filename: photo.filename,
       photoBufferSize: photoBuffer?.length || 0,
       displayUrlKind: displayUrl === url ? 'main' : 'debug',
       activeMainBlobUrl: !!this.currentBlobUrl,
       activeDebugBlobUrl: !!this.currentDebugBlobUrl,
       ...this.blobDiagnostics,
-    });
+    }));
     
     // Start next photo processing immediately after consuming cached photo
     this.requestNextPhoto();
