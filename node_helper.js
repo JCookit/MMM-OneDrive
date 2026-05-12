@@ -149,6 +149,30 @@ const DEFAULT_VISION_HEALTH_TIMEOUT_MS = 2000;
 const VISION_HEALTH_INTERVAL_MS = 30000;
 const MEMORY_TELEMETRY_INTERVAL = 10;
 const DEFAULT_RESIZE_BACKEND = 'sharp';
+const CRASH_BREADCRUMB_PATH = path.resolve(__dirname, 'cache', 'crash-breadcrumbs.log');
+
+function writeCrashBreadcrumb(stage, photo, extra = {}) {
+  const payload = {
+    ts: new Date().toISOString(),
+    pid: process.pid,
+    stage,
+    filename: photo?.filename || photo?.id || photo || null,
+    mimeType: photo?.mimeType || null,
+    index: photo?._indexOfPhotos,
+    rssMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    ...extra
+  };
+  const line = `[NodeHelper] CRASH_BREADCRUMB ${JSON.stringify(payload)}`;
+
+  console.log(line);
+
+  try {
+    fs.mkdirSync(path.dirname(CRASH_BREADCRUMB_PATH), { recursive: true });
+    fs.appendFileSync(CRASH_BREADCRUMB_PATH, `${line}\n`);
+  } catch (error) {
+    console.warn(`[NodeHelper] Failed to write crash breadcrumb: ${error.message}`);
+  }
+}
 
 function getResizeConfig(config = {}) {
   const resizeConfig = config.imageResize || {};
@@ -212,7 +236,9 @@ async function resizeImageWithCanvas(imageBuffer, photo, config) {
     const { showWidth, showHeight } = config;
 
     // Load image into Canvas (canvas 3.x auto-applies EXIF orientation)
+    writeCrashBreadcrumb('canvas_loadImage_start', photo, { inputBytes: imageBuffer.length });
     const img = await loadImage(imageBuffer);
+    writeCrashBreadcrumb('canvas_loadImage_done', photo, { width: img.width, height: img.height });
     const originalWidth = img.width;
     const originalHeight = img.height;
     console.log(`[NodeHelper] 🖼️ Original ${photo.filename}: ${originalWidth}x${originalHeight} (${Math.round(imageBuffer.length / 1024)}KB)`);
@@ -225,12 +251,16 @@ async function resizeImageWithCanvas(imageBuffer, photo, config) {
     console.log(`[NodeHelper] 🎯 Target dimensions: ${targetWidth}x${targetHeight}`);
     
     // Create canvas and scale the already-correctly-oriented image
+    writeCrashBreadcrumb('canvas_draw_start', photo, { targetWidth, targetHeight });
     const finalCanvas = createCanvas(targetWidth, targetHeight);
     const finalCtx = finalCanvas.getContext('2d');
     finalCtx.drawImage(img, 0, 0, targetWidth, targetHeight);
+    writeCrashBreadcrumb('canvas_draw_done', photo, { targetWidth, targetHeight });
     
     // Convert to JPEG buffer with high quality for vision processing
+    writeCrashBreadcrumb('canvas_toBuffer_start', photo, { targetWidth, targetHeight });
     const resized = finalCanvas.toBuffer('image/jpeg', { quality: 0.95 });
+    writeCrashBreadcrumb('canvas_toBuffer_done', photo, { outputBytes: resized.length });
     
     console.log(`[NodeHelper] 📏 Final result ${photo.filename}: ${targetWidth}x${targetHeight} (${Math.round(resized.length / 1024)}KB)`);
     
@@ -257,11 +287,20 @@ async function resizeImageWithCanvas(imageBuffer, photo, config) {
 
 async function resizeImageWithSharp(imageBuffer, photo, config) {
   try {
+    writeCrashBreadcrumb('sharp_resize_start', photo, { inputBytes: imageBuffer.length });
     configureSharpForResize(config);
 
     const { showWidth, showHeight } = config;
+    writeCrashBreadcrumb('sharp_create_pipeline_start', photo);
     const image = sharp(imageBuffer, { failOn: 'none' }).rotate();
+    writeCrashBreadcrumb('sharp_create_pipeline_done', photo);
+    writeCrashBreadcrumb('sharp_metadata_start', photo);
     const metadata = await image.metadata();
+    writeCrashBreadcrumb('sharp_metadata_done', photo, {
+      width: metadata?.width || null,
+      height: metadata?.height || null,
+      orientation: metadata?.orientation || null
+    });
     const { width: originalWidth, height: originalHeight } = getOrientedSharpDimensions(metadata);
 
     if (!originalWidth || !originalHeight) {
@@ -276,6 +315,7 @@ async function resizeImageWithSharp(imageBuffer, photo, config) {
 
     console.log(`[NodeHelper] 🎯 Target dimensions: ${targetWidth}x${targetHeight} using sharp`);
 
+    writeCrashBreadcrumb('sharp_toBuffer_start', photo, { targetWidth, targetHeight });
     const resized = await image
       .resize({
         width: targetWidth,
@@ -285,6 +325,7 @@ async function resizeImageWithSharp(imageBuffer, photo, config) {
       })
       .jpeg({ quality: 95 })
       .toBuffer();
+    writeCrashBreadcrumb('sharp_toBuffer_done', photo, { outputBytes: resized.length });
 
     console.log(`[NodeHelper] 📏 Final result ${photo.filename}: ${targetWidth}x${targetHeight} (${Math.round(resized.length / 1024)}KB)`);
 
@@ -1596,6 +1637,10 @@ const nodeHelperObject = {
       if (this.visionWorkerReady) {
         console.log(`[NodeHelper] Using vision worker for complete image processing...`);
         
+        writeCrashBreadcrumb('vision_ipc_send_start', photo || filename, {
+          inputBytes: imageBuffer?.length || 0,
+          visionWorkerPid: this.visionWorker?.pid || null
+        });
         const response = await this.sendVisionWorkerMessage({
           type: 'PROCESS_IMAGE',
           imageBuffer: imageBuffer,
@@ -1605,6 +1650,10 @@ const nodeHelperObject = {
             debugMode: this.config?.faceDetection?.debugMode || false
           }
         }, this.getVisionTimeoutMs());
+        writeCrashBreadcrumb('vision_ipc_response', photo || filename, {
+          responseType: response?.type || null,
+          visionWorkerPid: this.visionWorker?.pid || null
+        });
         
         if (response.type === 'PROCESSING_RESULT') {
           const { result, processingTime } = response;
@@ -2319,15 +2368,23 @@ const nodeHelperObject = {
     try {
       switch (photo.mimeType) {
         case "image/heic": {
+          writeCrashBreadcrumb('heic_convert_start', photo);
           buffer = await convertHEIC({ id: photo.id, filename: photo.filename, url: photo.baseUrl });
+          writeCrashBreadcrumb('heic_convert_done', photo, {
+            outputBytes: buffer?.length || 0
+          });
           pipelineTelemetry.mark('heic_converted', {
             bufferBytes: buffer?.length || 0
           });
           break;
         }
         default: {
+          writeCrashBreadcrumb('fetch_start', photo);
           const buf = await fetchToUint8Array(photo.baseUrl);
           buffer = Buffer.from(buf);
+          writeCrashBreadcrumb('fetch_done', photo, {
+            outputBytes: buffer?.length || 0
+          });
           pipelineTelemetry.mark('fetched', {
             bufferBytes: buffer?.length || 0
           });
@@ -2342,7 +2399,15 @@ const nodeHelperObject = {
         logMemoryUsage(`before resizing ${photo.filename}`);
         try {
           const beforeResizeBytes = buffer.length;
+          writeCrashBreadcrumb('resize_start', photo, {
+            inputBytes: beforeResizeBytes,
+            resizeBackend: resizeConfig.backend
+          });
           const resizedBuffer = await resizeImageCarefully(buffer, photo, this.config);
+          writeCrashBreadcrumb('resize_done', photo, {
+            outputBytes: resizedBuffer?.length || 0,
+            resizeBackend: resizeConfig.backend
+          });
           buffer = resizedBuffer;
           console.log(`[NodeHelper] ✅ Image resized to ${buffer.length} bytes`);
           logMemoryUsage(`after resizing ${photo.filename}`);
@@ -2383,7 +2448,12 @@ const nodeHelperObject = {
       let interestingRectangleResult = null;
       if (this.config.kenBurnsEffect !== false && photo.filename) {
         logMemoryUsage(`before vision processing ${photo.filename}`);
+        writeCrashBreadcrumb('vision_start', photo, { inputBytes: buffer?.length || 0 });
         interestingRectangleResult = await this.findInterestingRectangle(buffer, photo.filename);
+        writeCrashBreadcrumb('vision_done', photo, {
+          method: interestingRectangleResult?.method || 'none',
+          visionFallback: !!interestingRectangleResult?.visionFallback
+        });
         logMemoryUsage(`after vision processing ${photo.filename}`);
         pipelineTelemetry.mark('vision_complete', {
           method: interestingRectangleResult?.method || 'none',
