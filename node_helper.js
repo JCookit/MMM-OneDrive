@@ -594,6 +594,9 @@ const nodeHelperObject = {
           this.log_debug("Image loaded:", payload);
         }
         break;
+      case "FRONTEND_TELEMETRY":
+        console.log("[NodeHelper] FRONTEND_TELEMETRY", JSON.stringify(payload));
+        break;
       case "MODULE_SUSPENDED":
         console.log("[NodeHelper] 💤 Module suspended");
         this.moduleSuspended = true;

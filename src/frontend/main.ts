@@ -92,6 +92,8 @@ Module.register<Config>("MMM-OneDrive", {
       debugCreated: 0,
       debugRevoked: 0,
       displays: 0,
+      imageLoad: 0,
+      imageError: 0,
     };
 
     console.log("[MMM-OneDrive] Frontend initialized with caching system and blob URL management");
@@ -302,6 +304,43 @@ Module.register<Config>("MMM-OneDrive", {
     this.sendSocketNotification("NEXT_PHOTO", []);
   },
 
+  getRendererMemorySnapshot: function() {
+    const perf = window.performance as Performance & {
+      memory?: {
+        usedJSHeapSize?: number;
+        totalJSHeapSize?: number;
+        jsHeapSizeLimit?: number;
+      };
+    };
+
+    if (!perf.memory) {
+      return null;
+    }
+
+    const toMB = (bytes?: number) => typeof bytes === "number" ? Math.round(bytes / 1024 / 1024) : null;
+    return {
+      usedJSHeapMB: toMB(perf.memory.usedJSHeapSize),
+      totalJSHeapMB: toMB(perf.memory.totalJSHeapSize),
+      heapLimitMB: toMB(perf.memory.jsHeapSizeLimit),
+    };
+  },
+
+  emitFrontendTelemetry: function(stage: string, payload: Record<string, any>) {
+    const telemetry = {
+      stage,
+      ts: new Date().toISOString(),
+      suspended: this.suspended,
+      activeMainBlobUrl: !!this.currentBlobUrl,
+      activeDebugBlobUrl: !!this.currentDebugBlobUrl,
+      diagnostics: { ...this.blobDiagnostics },
+      rendererMemory: this.getRendererMemorySnapshot(),
+      ...payload,
+    };
+
+    console.log("[MMM-OneDrive] FRONTEND_TELEMETRY:", JSON.stringify(telemetry));
+    this.sendSocketNotification("FRONTEND_TELEMETRY", telemetry);
+  },
+
   displayCachedPhoto: function() {
     if (!this.photoCache) {
       console.warn("[MMM-OneDrive] ⚠ No cached photo available for display");
@@ -373,17 +412,37 @@ Module.register<Config>("MMM-OneDrive", {
     }
     
     console.debug(`[MMM-OneDrive] Display URL type: ${displayUrl.startsWith('blob:') ? 'blob' : 'other'}`);
-    
-    this.render(displayUrl, photo, album, interestingRectangleResult);
-    this.blobDiagnostics.displays++;
-    console.log("[MMM-OneDrive] BLOB_TELEMETRY:", JSON.stringify({
+    const displaySequence = this.blobDiagnostics.displays + 1;
+    const displayUrlKind = displayUrl === url ? 'main' : 'debug';
+    this.emitFrontendTelemetry("blob_prepared", {
       filename: photo.filename,
+      photoId: photo.id,
+      displaySequence,
       photoBufferSize: photoBuffer?.length || 0,
-      displayUrlKind: displayUrl === url ? 'main' : 'debug',
-      activeMainBlobUrl: !!this.currentBlobUrl,
-      activeDebugBlobUrl: !!this.currentDebugBlobUrl,
-      ...this.blobDiagnostics,
-    }));
+      debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0,
+      mimeType,
+      displayUrlKind,
+      mainBlobUrlLength: url.length,
+      debugBlobUrlLength: this.currentDebugBlobUrl?.length || 0,
+    });
+    
+    this.render(displayUrl, photo, album, interestingRectangleResult, {
+      displaySequence,
+      displayUrlKind,
+      photoBufferSize: photoBuffer?.length || 0,
+      debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0,
+      mimeType,
+    });
+    this.blobDiagnostics.displays++;
+    this.emitFrontendTelemetry("display_scheduled", {
+      filename: photo.filename,
+      photoId: photo.id,
+      displaySequence,
+      photoBufferSize: photoBuffer?.length || 0,
+      debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0,
+      mimeType,
+      displayUrlKind,
+    });
     
     // Start next photo processing immediately after consuming cached photo
     this.requestNextPhoto();
@@ -544,7 +603,7 @@ createStaticBackdropKeyframes: function(): void {
   document.head.appendChild(styleElement);
 },
 
-  render: function (url: string, target: OneDriveMediaItem, album: DriveItem, visionResults?: any) {
+  render: function (url: string, target: OneDriveMediaItem, album: DriveItem, visionResults?: any, displayTelemetry?: any) {
     if (this.suspended) {
       console.debug("[MMM-OneDrive] Module is suspended, skipping render");
       return;
@@ -558,7 +617,39 @@ createStaticBackdropKeyframes: function(): void {
     
     // Using IMG elements with CSS animations for best Pi performance
     back.style.backgroundImage = `url(${url})`; // Keep backdrop as background for blur effect
-    current.innerHTML = `<img src="${url}" style="width: 100%; height: 100%; object-fit: contain; display: block;">`;
+    const img = document.createElement("img");
+    img.style.width = "100%";
+    img.style.height = "100%";
+    img.style.objectFit = "contain";
+    img.style.display = "block";
+    img.onload = () => {
+      this.blobDiagnostics.imageLoad++;
+      this.emitFrontendTelemetry("image_load", {
+        filename: target.filename,
+        photoId: target.id,
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+        elapsedMs: new Date().getTime() - startDt.getTime(),
+        ...displayTelemetry,
+      });
+    };
+    img.onerror = () => {
+      this.blobDiagnostics.imageError++;
+      this.emitFrontendTelemetry("image_error", {
+        filename: target.filename,
+        photoId: target.id,
+        elapsedMs: new Date().getTime() - startDt.getTime(),
+        ...displayTelemetry,
+      });
+    };
+    img.src = url;
+    current.appendChild(img);
+    this.emitFrontendTelemetry("render_start", {
+      filename: target.filename,
+      photoId: target.id,
+      hasFocalPoint: !!focalPoint,
+      ...displayTelemetry,
+    });
 
     // Clear any existing animation
     back.style.animation = 'none';
@@ -692,6 +783,10 @@ createStaticBackdropKeyframes: function(): void {
     
     // We're using IMG elements - get the img element to animate
     const imgElement = current.querySelector('img') as HTMLImageElement;
+    if (!imgElement) {
+      console.warn(`[MMM-OneDrive] Missing image element for Ken Burns animation: ${target.filename}`);
+      return;
+    }
     
     // Cancel any existing animation
     if (current.kenBurnsAnimation) {
