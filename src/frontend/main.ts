@@ -45,6 +45,7 @@ Module.register<Config>("MMM-OneDrive", {
     leftMargin: null, // e.g. "25vw" or "400px" - leaves space for left sidebar modules
     kenBurnsEffect: true, // Enable Ken Burns crop-and-zoom effect by default
     kenBurnsCenterStart: true, // NEW: Start with focal point centered, then pan to natural position
+    debugAlwaysStaticImage: false, // Debug-only: keep backend vision enabled but suppress frontend pan/zoom transforms
     faceDetection: {
       enabled: true, // Enable face detection for Ken Burns focal points
       minFaceSize: 50, // Minimum face size in pixels
@@ -648,6 +649,7 @@ createStaticBackdropKeyframes: function(): void {
       filename: target.filename,
       photoId: target.id,
       hasFocalPoint: !!focalPoint,
+      debugAlwaysStaticImage: this.config.debugAlwaysStaticImage === true,
       ...displayTelemetry,
     });
 
@@ -710,7 +712,12 @@ createStaticBackdropKeyframes: function(): void {
     
     // ==================== KEN BURNS EFFECT ==================== 
     if (this.config.kenBurnsEffect !== false) { // Default to enabled unless explicitly disabled
-      if (focalPoint) {
+      if (this.config.debugAlwaysStaticImage === true) {
+        this.applyCSSKenBurns(current, 50, 50, target, totalDuration, null, {
+          type: 'static',
+          reason: 'debug_always_static_image',
+        });
+      } else if (focalPoint) {
         // Get image dimensions from photo metadata for pixel-to-percentage conversion
         const imageWidth = Number(target.mediaMetadata?.width);
         const imageHeight = Number(target.mediaMetadata?.height);
