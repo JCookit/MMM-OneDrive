@@ -230,20 +230,37 @@ class OneDrivePhotos extends EventEmitter {
         .replace("$$driveId$$", item.parentReference.driveId)
         .replace("$$itemId$$", item.id)
       : protectedResources.getThumbnail.endpoint.replace("$$itemId$$", item.id);
-    const url = `${baseEndpoint}?select=${encodeURIComponent(size)}`;
-    const response = await this.request("getItemThumbnail", url, "get", null);
-    const thumbnail = response?.value?.[0]?.[size];
 
-    if (!thumbnail?.url) {
-      throw new Error(`No OneDrive thumbnail URL returned for size ${size}`);
+    const attempts = [
+      { label: size, url: `${baseEndpoint}/0/${encodeURIComponent(size)}`, responseType: "single" },
+      { label: size, url: `${baseEndpoint}?select=${encodeURIComponent(size)}`, responseType: "collection" },
+      { label: "large", url: `${baseEndpoint}/0/large`, responseType: "single" },
+    ];
+
+    const errors = [];
+    for (const attempt of attempts) {
+      try {
+        const response = await this.request(`getItemThumbnail:${attempt.label}`, attempt.url, "get", null);
+        const thumbnail = attempt.responseType === "single"
+          ? response
+          : response?.value?.[0]?.[attempt.label];
+
+        if (thumbnail?.url) {
+          return {
+            url: thumbnail.url,
+            width: thumbnail.width,
+            height: thumbnail.height,
+            size: attempt.label,
+          };
+        }
+
+        errors.push(`${attempt.label}: no url returned`);
+      } catch (error) {
+        errors.push(`${attempt.label}: ${error.message}`);
+      }
     }
 
-    return {
-      url: thumbnail.url,
-      width: thumbnail.width,
-      height: thumbnail.height,
-      size,
-    };
+    throw new Error(`No OneDrive thumbnail URL returned (${errors.join("; ")})`);
   }
 
   /**
