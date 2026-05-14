@@ -38,6 +38,15 @@ Lifecycle and error paths:
 - `NO_PHOTO` only clears `processingRequested`.
 - `UPDATE_STATUS` only updates info text.
 
+Device-auth first run:
+
+1. Backend emits `ERROR` with the device-auth message.
+2. Frontend shows that message in `ONEDRIVE_PHOTO_ERROR`, an overlay inside the photo module.
+3. The overlay may be the only visible content if no photo has displayed yet.
+4. After the user completes auth, backend emits `CLEAR_ERROR`.
+5. Frontend removes only `ONEDRIVE_PHOTO_ERROR` and continues requesting/loading photos.
+6. `CLEAR_ERROR` must never clear `ONEDRIVE_PHOTO_CURRENT`, because auth success also occurs during normal token refreshes and thumbnail fetches.
+
 ## Known Failure Pattern
 
 The bad flow was:
@@ -66,6 +75,8 @@ Immediate backend prefetch is still required and should remain in place.
 ## Implemented Change
 
 The frontend now prepares blob URLs in `displayCachedPhoto()` but keeps the previously displayed blob URLs active. `render()` loads the replacement `<img>` off-DOM and commits the swap only after `onload`. Old blob URLs are revoked only after `foreground_swap_committed`. If the replacement image errors or becomes stale, the old displayed photo remains intact and the unused new blob URLs are revoked.
+
+Error display now uses a separate `ONEDRIVE_PHOTO_ERROR` overlay. `ERROR` creates/updates that overlay, and `CLEAR_ERROR` removes only that overlay. This preserves the expected first-run device-auth message while preventing later auth success events from blanking the foreground photo.
 
 ## Signals To Watch
 
