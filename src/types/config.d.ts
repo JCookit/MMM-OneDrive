@@ -31,6 +31,7 @@ export type Config = {
   kenBurnsEffect?: boolean; // Enable/disable Ken Burns crop-and-zoom effect
   kenBurnsCenterStart?: boolean; // Start with focal point centered, then pan to natural position
   debugAlwaysStaticImage?: boolean; // Debug-only: keep backend vision enabled but suppress frontend pan/zoom transforms
+  debugDomTelemetry?: boolean; // Debug-only: emit verbose DOM mutation telemetry
   faceDetection?: {
     enabled?: boolean; // Enable face detection for Ken Burns focal points
     minFaceSize?: number; // Minimum face size in pixels

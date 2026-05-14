@@ -9,6 +9,8 @@ As of 2026-05-14, MMM-OneDrive is testing `imageResize.backend: "onedriveThumbna
 - `image_load` / `image_error`
 - `foreground_style_snapshot`
 
+Verbose DOM mutation telemetry is available with `debugDomTelemetry: true`, but defaults off so thumbnail/memory runs stay readable.
+
 The latest working hypothesis is that the foreground blanking is a frontend state-machine problem, not bad image bytes. Telemetry shows valid image buffers, valid MIME, successful `image_load`, and nonzero natural dimensions.
 
 ## Event Flow
@@ -88,12 +90,12 @@ Expected healthy telemetry:
 - `foreground_swap_committed`.
 - `image_load` with nonzero `naturalWidth` and `naturalHeight`.
 - `foreground_style_snapshot` without needing to stop the backend.
-- `dom_mutation` events showing every foreground, backdrop, wrapper, info, and animation mutation in order.
+- If `debugDomTelemetry: true`, `dom_mutation` events showing every foreground, backdrop, wrapper, info, and animation mutation in order.
 
 Unexpected signals:
 
 - `image_error` for normal JPEG/HEIC-converted payloads.
 - `foreground_swap_stale` frequently, which would imply overlapping display renders.
 - `mainRevoked` incrementing before `foreground_swap_committed`.
-- Any `dom_mutation` event from `CLEAR_ERROR` that touches foreground, backdrop, or animation state.
-- A `dom_mutation` event that clears foreground, changes animation, or changes backdrop at the same time the foreground disappears unexpectedly.
+- If `debugDomTelemetry: true`, any `dom_mutation` event from `CLEAR_ERROR` that touches foreground, backdrop, or animation state.
+- If `debugDomTelemetry: true`, a `dom_mutation` event that clears foreground, changes animation, or changes backdrop at the same time the foreground disappears unexpectedly.

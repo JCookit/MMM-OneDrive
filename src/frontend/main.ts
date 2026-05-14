@@ -46,6 +46,7 @@ Module.register<Config>("MMM-OneDrive", {
     kenBurnsEffect: true, // Enable Ken Burns crop-and-zoom effect by default
     kenBurnsCenterStart: true, // NEW: Start with focal point centered, then pan to natural position
     debugAlwaysStaticImage: false, // Debug-only: keep backend vision enabled but suppress frontend pan/zoom transforms
+    debugDomTelemetry: false, // Debug-only: emit verbose DOM mutation telemetry
     faceDetection: {
       enabled: true, // Enable face detection for Ken Burns focal points
       minFaceSize: 50, // Minimum face size in pixels
@@ -328,6 +329,8 @@ Module.register<Config>("MMM-OneDrive", {
   },
 
   emitDomMutationTelemetry: function(action: string, payload: Record<string, any> = {}) {
+    if (this.config.debugDomTelemetry !== true) return;
+
     this.emitFrontendTelemetry("dom_mutation", {
       action,
       ...payload,
