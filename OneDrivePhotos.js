@@ -211,6 +211,42 @@ class OneDrivePhotos extends EventEmitter {
   }
 
   /**
+   * @param {OneDriveMediaItem} item
+   * @param {string} size OneDrive thumbnail size, e.g. c1080x1920
+   * @returns {Promise<{url: string, width?: number, height?: number, size: string}>}
+   */
+  async getItemThumbnail(item, size) {
+    if (!item?.id) {
+      throw new Error("Cannot fetch thumbnail without item id");
+    }
+    if (!size) {
+      throw new Error("Cannot fetch thumbnail without requested size");
+    }
+
+    await this.onAuthReady();
+
+    const baseEndpoint = item.parentReference?.driveId
+      ? protectedResources.getThumbnailInDrive.endpoint
+        .replace("$$driveId$$", item.parentReference.driveId)
+        .replace("$$itemId$$", item.id)
+      : protectedResources.getThumbnail.endpoint.replace("$$itemId$$", item.id);
+    const url = `${baseEndpoint}?select=${encodeURIComponent(size)}`;
+    const response = await this.request("getItemThumbnail", url, "get", null);
+    const thumbnail = response?.value?.[0]?.[size];
+
+    if (!thumbnail?.url) {
+      throw new Error(`No OneDrive thumbnail URL returned for size ${size}`);
+    }
+
+    return {
+      url: thumbnail.url,
+      width: thumbnail.width,
+      height: thumbnail.height,
+      size,
+    };
+  }
+
+  /**
    * @param {string} imageUrl
    * @returns {Promise<ExifReader.Tags>} EXIF data
    */

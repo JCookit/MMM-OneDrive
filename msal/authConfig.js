@@ -54,6 +54,9 @@ const protectedResources = {
   getThumbnail: {
     endpoint: `${GRAPH_ENDPOINT_HOST}v1.0/drive/items/$$itemId$$/thumbnails`,
   },
+  getThumbnailInDrive: {
+    endpoint: `${GRAPH_ENDPOINT_HOST}v1.0/drives/$$driveId$$/items/$$itemId$$/thumbnails`,
+  },
   $batch: {
     endpoint: `${GRAPH_ENDPOINT_HOST}v1.0/$batch`,
   },

@@ -181,11 +181,37 @@ function getResizeConfig(config = {}) {
   ).toLowerCase();
 
   return {
-    backend: backend === 'canvas' ? 'canvas' : 'sharp',
+    backend: backend === 'canvas'
+      ? 'canvas'
+      : backend === 'onedrivethumbnail'
+        ? 'onedriveThumbnail'
+        : 'sharp',
     sharpCache: resizeConfig.sharpCache !== undefined ? resizeConfig.sharpCache !== false : false,
     sharpConcurrency: Number.isFinite(Number(resizeConfig.sharpConcurrency))
       ? Math.max(1, Math.floor(Number(resizeConfig.sharpConcurrency)))
       : 1
+  };
+}
+
+function getOneDriveThumbnailSize(config = {}) {
+  const width = Math.max(1, Math.floor(Number(config.showWidth || config.showHeight || 0)));
+  const height = Math.max(1, Math.floor(Number(config.showHeight || config.showWidth || 0)));
+
+  if (!width || !height) {
+    return null;
+  }
+
+  return `c${width}x${height}`;
+}
+
+function getSharpFallbackResizeConfig(config = {}) {
+  return {
+    ...config,
+    imageResize: {
+      ...(config.imageResize || {}),
+      backend: 'sharp'
+    },
+    resizeBackend: 'sharp'
   };
 }
 
@@ -2368,36 +2394,96 @@ const nodeHelperObject = {
     }
 
     let buffer = null;
+    let mimeTypeToSend = photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType;
+    let oneDriveThumbnailSucceeded = false;
+    let oneDriveThumbnailFailed = false;
     try {
-      switch (photo.mimeType) {
-        case "image/heic": {
-          writeCrashBreadcrumb('heic_convert_start', photo);
-          buffer = await convertHEIC({ id: photo.id, filename: photo.filename, url: photo.baseUrl });
-          writeCrashBreadcrumb('heic_convert_done', photo, {
-            outputBytes: buffer?.length || 0
+      const resizeConfig = getResizeConfig(this.config);
+      const thumbnailSize = getOneDriveThumbnailSize(this.config);
+
+      if (resizeConfig.backend === 'onedriveThumbnail' && thumbnailSize) {
+        try {
+          console.log(`[NodeHelper] 🖼️ Requesting OneDrive thumbnail ${thumbnailSize} for ${photo.filename}`);
+          writeCrashBreadcrumb('onedrive_thumbnail_start', photo, { thumbnailSize });
+          pipelineTelemetry.mark('onedrive_thumbnail_start', { thumbnailSize });
+
+          const thumbnail = await oneDrivePhotosInstance.getItemThumbnail(photo, thumbnailSize);
+          writeCrashBreadcrumb('onedrive_thumbnail_url', photo, {
+            thumbnailSize,
+            thumbnailWidth: thumbnail.width || null,
+            thumbnailHeight: thumbnail.height || null
           });
-          pipelineTelemetry.mark('heic_converted', {
-            bufferBytes: buffer?.length || 0
-          });
-          break;
-        }
-        default: {
-          writeCrashBreadcrumb('fetch_start', photo);
-          const buf = await fetchToUint8Array(photo.baseUrl);
+
+          const buf = await fetchToUint8Array(thumbnail.url);
           buffer = Buffer.from(buf);
-          writeCrashBreadcrumb('fetch_done', photo, {
-            outputBytes: buffer?.length || 0
+          mimeTypeToSend = 'image/jpeg';
+          oneDriveThumbnailSucceeded = true;
+
+          if (photo.mediaMetadata) {
+            if (thumbnail.width) photo.mediaMetadata.width = thumbnail.width;
+            if (thumbnail.height) photo.mediaMetadata.height = thumbnail.height;
+          }
+
+          writeCrashBreadcrumb('onedrive_thumbnail_fetched', photo, {
+            thumbnailSize,
+            outputBytes: buffer.length,
+            outputWidth: thumbnail.width || null,
+            outputHeight: thumbnail.height || null
           });
-          pipelineTelemetry.mark('fetched', {
-            bufferBytes: buffer?.length || 0
+          pipelineTelemetry.mark('onedrive_thumbnail_fetched', {
+            thumbnailSize,
+            bufferBytes: buffer.length,
+            outputWidth: thumbnail.width || null,
+            outputHeight: thumbnail.height || null
           });
-          break;
+        } catch (thumbnailError) {
+          oneDriveThumbnailFailed = true;
+          console.warn(`[NodeHelper] ⚠️ Failed to fetch OneDrive thumbnail for ${photo.filename}, falling back to full image:`, thumbnailError.message);
+          writeCrashBreadcrumb('onedrive_thumbnail_failed', photo, {
+            thumbnailSize,
+            errorMessage: thumbnailError.message
+          });
+          pipelineTelemetry.mark('onedrive_thumbnail_failed', {
+            thumbnailSize,
+            errorMessage: thumbnailError.message
+          });
+        }
+      }
+
+      if (!buffer) {
+        switch (photo.mimeType) {
+          case "image/heic": {
+            writeCrashBreadcrumb('heic_convert_start', photo);
+            buffer = await convertHEIC({ id: photo.id, filename: photo.filename, url: photo.baseUrl });
+            writeCrashBreadcrumb('heic_convert_done', photo, {
+              outputBytes: buffer?.length || 0
+            });
+            pipelineTelemetry.mark('heic_converted', {
+              bufferBytes: buffer?.length || 0
+            });
+            break;
+          }
+          default: {
+            writeCrashBreadcrumb('fetch_start', photo);
+            const buf = await fetchToUint8Array(photo.baseUrl);
+            buffer = Buffer.from(buf);
+            writeCrashBreadcrumb('fetch_done', photo, {
+              outputBytes: buffer?.length || 0
+            });
+            pipelineTelemetry.mark('fetched', {
+              bufferBytes: buffer?.length || 0
+            });
+            break;
+          }
         }
       }
 
       // Carefully resize image based on showWidth/showHeight config (preserving format exactly)
-      if (buffer && (this.config.showWidth || this.config.showHeight)) {
-        const resizeConfig = getResizeConfig(this.config);
+      if (buffer && (this.config.showWidth || this.config.showHeight) && !oneDriveThumbnailSucceeded) {
+        const localResizeConfig = oneDriveThumbnailFailed
+          ? getSharpFallbackResizeConfig(this.config)
+          : this.config;
+        const resizeConfig = getResizeConfig(localResizeConfig);
         console.log(`[NodeHelper] 📏 Resizing ${photo.filename} from full resolution to fit ${this.config.showWidth}x${this.config.showHeight} using ${resizeConfig.backend}`);
         logMemoryUsage(`before resizing ${photo.filename}`);
         try {
@@ -2406,7 +2492,7 @@ const nodeHelperObject = {
             inputBytes: beforeResizeBytes,
             resizeBackend: resizeConfig.backend
           });
-          const resizedBuffer = await resizeImageCarefully(buffer, photo, this.config);
+          const resizedBuffer = await resizeImageCarefully(buffer, photo, localResizeConfig);
           writeCrashBreadcrumb('resize_done', photo, {
             outputBytes: resizedBuffer?.length || 0,
             resizeBackend: resizeConfig.backend
@@ -2429,6 +2515,13 @@ const nodeHelperObject = {
           });
           // Continue with original buffer if resize fails
         }
+      } else if (oneDriveThumbnailSucceeded) {
+        pipelineTelemetry.mark('resize_bypassed_by_onedrive_thumbnail', {
+          bufferBytes: buffer?.length || 0,
+          showWidth: this.config.showWidth || null,
+          showHeight: this.config.showHeight || null,
+          resizeBackend: resizeConfig.backend
+        });
       } else {
         pipelineTelemetry.mark('resize_skipped', {
           bufferBytes: buffer?.length || 0,
@@ -2480,7 +2573,7 @@ const nodeHelperObject = {
         });
       }
 
-      console.log(`[NodeHelper] 📤 Sending photo to frontend: ${photo.filename} (${buffer.length} bytes, ${photo.mimeType})`);
+      console.log(`[NodeHelper] 📤 Sending photo to frontend: ${photo.filename} (${buffer.length} bytes, ${mimeTypeToSend})`);
       console.debug(`[NodeHelper] Photo payload debug:`, {
         hasPhotoBuffer: !!buffer,
         photoBufferSize: buffer.length,
@@ -2493,7 +2586,7 @@ const nodeHelperObject = {
       this.log_debug("Image send to UI:", { id: photo.id, filename: photo.filename, index: photo._indexOfPhotos });
       this.sendSocketNotification("RENDER_PHOTO", { 
         photoBuffer: buffer, // Send raw binary buffer instead of base64
-        mimeType: photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType, // Store mime type separately
+        mimeType: mimeTypeToSend, // Store mime type separately
         photo, 
         album: source, 
         info: null, 
@@ -2502,7 +2595,7 @@ const nodeHelperObject = {
       });
       pipelineTelemetry.mark('sent_to_frontend', {
         photoBufferBytes: buffer?.length || 0,
-        mimeTypeSent: photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType
+        mimeTypeSent: mimeTypeToSend
       });
 
       // EXPLICITLY NULL LARGE OBJECTS
