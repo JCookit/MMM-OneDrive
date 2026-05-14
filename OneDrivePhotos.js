@@ -225,17 +225,22 @@ class OneDrivePhotos extends EventEmitter {
 
     await this.onAuthReady();
 
-    const baseEndpoint = item.parentReference?.driveId
+    const userDriveEndpoint = protectedResources.getThumbnail.endpoint.replace("$$itemId$$", item.id);
+    const driveSpecificEndpoint = item.parentReference?.driveId
       ? protectedResources.getThumbnailInDrive.endpoint
         .replace("$$driveId$$", item.parentReference.driveId)
         .replace("$$itemId$$", item.id)
-      : protectedResources.getThumbnail.endpoint.replace("$$itemId$$", item.id);
+      : null;
 
     const attempts = [
-      { label: size, url: `${baseEndpoint}/0/${encodeURIComponent(size)}`, responseType: "single" },
-      { label: size, url: `${baseEndpoint}?select=${encodeURIComponent(size)}`, responseType: "collection" },
-      { label: "large", url: `${baseEndpoint}/0/large`, responseType: "single" },
-    ];
+      { label: size, url: `${userDriveEndpoint}/0/${encodeURIComponent(size)}`, responseType: "single" },
+      { label: size, url: `${userDriveEndpoint}?select=${encodeURIComponent(size)}`, responseType: "collection" },
+      { label: "large", url: `${userDriveEndpoint}/0/large`, responseType: "single" },
+    ].concat(driveSpecificEndpoint ? [
+      { label: size, url: `${driveSpecificEndpoint}/0/${encodeURIComponent(size)}`, responseType: "single" },
+      { label: size, url: `${driveSpecificEndpoint}?select=${encodeURIComponent(size)}`, responseType: "collection" },
+      { label: "large", url: `${driveSpecificEndpoint}/0/large`, responseType: "single" },
+    ] : []);
 
     const errors = [];
     for (const attempt of attempts) {
