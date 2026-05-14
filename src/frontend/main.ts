@@ -85,6 +85,7 @@ Module.register<Config>("MMM-OneDrive", {
     this.photoCache = null; // Will store: { photo, photoBuffer, mimeType, album, interestingRectangleResult }
     this.displayTimer = null;
     this.processingRequested = false;
+    this.renderGeneration = 0;
     this.currentBlobUrl = null; // For blob URL cleanup
     this.currentDebugBlobUrl = null; // For debug image blob URL cleanup
     this.blobDiagnostics = {
@@ -391,6 +392,32 @@ Module.register<Config>("MMM-OneDrive", {
     };
   },
 
+  revokeTrackedBlobUrl: function(url: string | null, kind: 'main' | 'debug') {
+    if (!url) return;
+    URL.revokeObjectURL(url);
+    if (kind === 'debug') {
+      this.blobDiagnostics.debugRevoked++;
+    } else {
+      this.blobDiagnostics.mainRevoked++;
+    }
+  },
+
+  revokePreparedBlobUrls: function(blobUrls: any) {
+    this.revokeTrackedBlobUrl(blobUrls?.mainBlobUrl || null, 'main');
+    this.revokeTrackedBlobUrl(blobUrls?.debugBlobUrl || null, 'debug');
+  },
+
+  commitPreparedBlobUrls: function(blobUrls: any) {
+    const previousMainBlobUrl = blobUrls?.previousMainBlobUrl || null;
+    const previousDebugBlobUrl = blobUrls?.previousDebugBlobUrl || null;
+
+    this.currentBlobUrl = blobUrls?.mainBlobUrl || null;
+    this.currentDebugBlobUrl = blobUrls?.debugBlobUrl || null;
+
+    this.revokeTrackedBlobUrl(previousMainBlobUrl, 'main');
+    this.revokeTrackedBlobUrl(previousDebugBlobUrl, 'debug');
+  },
+
   displayCachedPhoto: function() {
     if (!this.photoCache) {
       console.warn("[MMM-OneDrive] ⚠ No cached photo available for display");
@@ -413,20 +440,17 @@ Module.register<Config>("MMM-OneDrive", {
       debugImageBufferSize
     });
     
+    const previousMainBlobUrl = this.currentBlobUrl;
+    const previousDebugBlobUrl = this.currentDebugBlobUrl;
+
     // Convert raw buffer to Blob URL (more efficient than base64)
     const blob = new Blob([photoBuffer], { type: mimeType });
     const url = URL.createObjectURL(blob);
     this.blobDiagnostics.mainCreated++;
-    
-    // Store blob URL for cleanup later
-    if (this.currentBlobUrl) {
-      URL.revokeObjectURL(this.currentBlobUrl);
-      this.blobDiagnostics.mainRevoked++;
-    }
-    this.currentBlobUrl = url;
-    
+
     // Handle debug image if present (convert binary buffer to blob URL)
     let displayUrl = url; // Default to main photo blob URL
+    let debugBlobUrl: string | null = null;
     
     if (interestingRectangleResult?.debugImageBuffer) {
       try {
@@ -434,16 +458,9 @@ Module.register<Config>("MMM-OneDrive", {
         
         // Convert debug image buffer to blob URL
         const debugBlob = new Blob([interestingRectangleResult.debugImageBuffer], { type: 'image/jpeg' });
-        const debugBlobUrl = URL.createObjectURL(debugBlob);
+        debugBlobUrl = URL.createObjectURL(debugBlob);
         this.blobDiagnostics.debugCreated++;
-        
-        // Clean up previous debug blob URL
-        if (this.currentDebugBlobUrl) {
-          URL.revokeObjectURL(this.currentDebugBlobUrl);
-          this.blobDiagnostics.debugRevoked++;
-        }
-        this.currentDebugBlobUrl = debugBlobUrl;
-        
+
         // Use debug image for display
         displayUrl = debugBlobUrl;
         
@@ -454,12 +471,7 @@ Module.register<Config>("MMM-OneDrive", {
         // Fall back to main image
         displayUrl = url;
       }
-    } else {
-      if (this.currentDebugBlobUrl) {
-        URL.revokeObjectURL(this.currentDebugBlobUrl);
-        this.blobDiagnostics.debugRevoked++;
-        this.currentDebugBlobUrl = null;
-      }
+    } else if (this.currentDebugBlobUrl) {
       console.debug("[MMM-OneDrive] ℹ️ No debug image buffer found, using main image");
     }
     
@@ -475,7 +487,7 @@ Module.register<Config>("MMM-OneDrive", {
       mimeType,
       displayUrlKind,
       mainBlobUrlLength: url.length,
-      debugBlobUrlLength: this.currentDebugBlobUrl?.length || 0,
+      debugBlobUrlLength: debugBlobUrl?.length || 0,
     });
     
     this.render(displayUrl, photo, album, interestingRectangleResult, {
@@ -484,6 +496,12 @@ Module.register<Config>("MMM-OneDrive", {
       photoBufferSize,
       debugImageBufferSize,
       mimeType,
+    }, {
+      mainBlobUrl: url,
+      debugBlobUrl,
+      previousMainBlobUrl,
+      previousDebugBlobUrl,
+      displayUrlKind,
     });
     this.blobDiagnostics.displays++;
     this.emitFrontendTelemetry("display_scheduled", {
@@ -655,26 +673,156 @@ createStaticBackdropKeyframes: function(): void {
   document.head.appendChild(styleElement);
 },
 
-  render: function (url: string, target: OneDriveMediaItem, album: DriveItem, visionResults?: any, displayTelemetry?: any) {
+  render: function (url: string, target: OneDriveMediaItem, album: DriveItem, visionResults?: any, displayTelemetry?: any, blobUrls?: any) {
     if (this.suspended) {
       console.debug("[MMM-OneDrive] Module is suspended, skipping render");
+      this.revokePreparedBlobUrls(blobUrls);
       return;
     }
+
     const focalPoint = visionResults?.focalPoint || null;
     const startDt = new Date();
     const back = document.getElementById("ONEDRIVE_PHOTO_BACKDROP");
     const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
-    current.textContent = "";
-    back.style.backgroundImage = "";
-    
-    // Using IMG elements with CSS animations for best Pi performance
-    back.style.backgroundImage = `url(${url})`; // Keep backdrop as background for blur effect
+    const renderGeneration = ++this.renderGeneration;
+    const totalDuration = this.config.updateInterval / 1000;
+
     const img = document.createElement("img");
     img.style.width = "100%";
     img.style.height = "100%";
     img.style.objectFit = "contain";
     img.style.display = "block";
+
+    this.emitFrontendTelemetry("render_start", {
+      filename: target.filename,
+      photoId: target.id,
+      hasFocalPoint: !!focalPoint,
+      debugAlwaysStaticImage: this.config.debugAlwaysStaticImage === true,
+      ...displayTelemetry,
+    });
+
     img.onload = () => {
+      if (renderGeneration !== this.renderGeneration) {
+        this.emitFrontendTelemetry("foreground_swap_stale", {
+          filename: target.filename,
+          photoId: target.id,
+          naturalWidth: img.naturalWidth,
+          naturalHeight: img.naturalHeight,
+          elapsedMs: new Date().getTime() - startDt.getTime(),
+          ...displayTelemetry,
+        });
+        this.revokePreparedBlobUrls(blobUrls);
+        return;
+      }
+
+      this.emitFrontendTelemetry("foreground_swap_ready", {
+        filename: target.filename,
+        photoId: target.id,
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+        elapsedMs: new Date().getTime() - startDt.getTime(),
+        ...displayTelemetry,
+      });
+
+      if (this.config.leftMargin) {
+        let clipWrapper = document.getElementById("ONEDRIVE_PHOTO_CLIP_WRAPPER");
+        if (!clipWrapper) {
+          clipWrapper = document.createElement("div");
+          clipWrapper.id = "ONEDRIVE_PHOTO_CLIP_WRAPPER";
+          clipWrapper.style.position = "absolute";
+          clipWrapper.style.overflow = "hidden";
+          clipWrapper.style.top = "10px";
+          clipWrapper.style.bottom = "10px";
+
+          const parent = current.parentNode;
+          parent.insertBefore(clipWrapper, current);
+          clipWrapper.appendChild(current);
+        }
+
+        clipWrapper.style.left = this.config.leftMargin;
+        clipWrapper.style.right = "10px";
+        current.style.left = "0";
+        current.style.right = "0";
+        current.style.top = "0";
+        current.style.bottom = "0";
+        current.style.width = "100%";
+        current.style.height = "100%";
+        current.style.overflow = "";
+      } else {
+        const clipWrapper = document.getElementById("ONEDRIVE_PHOTO_CLIP_WRAPPER");
+        if (clipWrapper) {
+          const parent = clipWrapper.parentNode;
+          parent.insertBefore(current, clipWrapper);
+          parent.removeChild(clipWrapper);
+
+          current.style.left = "10px";
+          current.style.right = "10px";
+          current.style.top = "10px";
+          current.style.bottom = "10px";
+        }
+      }
+
+      current.textContent = "";
+      current.appendChild(img);
+
+      back.style.backgroundImage = "";
+      back.style.backgroundImage = `url(${url})`;
+      back.style.animation = 'none';
+      back.offsetHeight;
+      this.createStaticBackdropKeyframes();
+      back.style.animation = `backdrop-cycle ${totalDuration}s linear forwards`;
+
+      if (this.config.kenBurnsEffect !== false) {
+        if (this.config.debugAlwaysStaticImage === true) {
+          this.applyCSSKenBurns(current, 50, 50, target, totalDuration, null, {
+            type: 'static',
+            reason: 'debug_always_static_image',
+          });
+        } else if (focalPoint) {
+          const imageWidth = Number(target.mediaMetadata?.width);
+          const imageHeight = Number(target.mediaMetadata?.height);
+
+          if (imageWidth && imageHeight) {
+            const focalCenterX = (focalPoint.x + focalPoint.width / 2) / imageWidth;
+            const focalCenterY = (focalPoint.y + focalPoint.height / 2) / imageHeight;
+
+            let cropX = focalCenterX * 100;
+            let cropY = focalCenterY * 100;
+
+            cropX = Math.max(20, Math.min(80, cropX));
+            cropY = Math.max(20, Math.min(80, cropY));
+
+            console.log(`[MMM-OneDrive] Using face-detected focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
+            this.applyKenBurnsAnimation(current, cropX, cropY, target, focalPoint, visionResults);
+          } else {
+            console.warn(`[MMM-OneDrive] Missing image dimensions for focal point conversion, using random`);
+            const cropX = Math.random() * 60 + 20;
+            const cropY = Math.random() * 60 + 20;
+            this.applyKenBurnsAnimation(current, cropX, cropY, target, focalPoint, visionResults);
+          }
+        } else {
+          const cropX = Math.random() * 60 + 20;
+          const cropY = Math.random() * 60 + 20;
+
+          console.log(`[MMM-OneDrive] Using random focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
+          this.applyKenBurnsAnimation(current, cropX, cropY, target, null, visionResults);
+        }
+      } else {
+        current.style.removeProperty('animation');
+        current.style.removeProperty('overflow');
+      }
+
+      this.applyCommonStyling(current, target, album, startDt, this.config.kenBurnsEffect !== false, visionResults);
+      this.commitPreparedBlobUrls(blobUrls);
+
+      this.emitFrontendTelemetry("foreground_swap_committed", {
+        filename: target.filename,
+        photoId: target.id,
+        elapsedMs: new Date().getTime() - startDt.getTime(),
+        foregroundState: this.getForegroundRenderState(current, img),
+        ...displayTelemetry,
+      });
+
       this.blobDiagnostics.imageLoad++;
       this.emitFrontendTelemetry("image_load", {
         filename: target.filename,
@@ -685,7 +833,21 @@ createStaticBackdropKeyframes: function(): void {
         foregroundState: this.getForegroundRenderState(current, img),
         ...displayTelemetry,
       });
+
+      setTimeout(() => {
+        if (!current.contains(img)) return;
+        this.emitFrontendTelemetry("foreground_style_snapshot", {
+          filename: target.filename,
+          photoId: target.id,
+          elapsedMs: new Date().getTime() - startDt.getTime(),
+          naturalWidth: img.naturalWidth,
+          naturalHeight: img.naturalHeight,
+          foregroundState: this.getForegroundRenderState(current, img),
+          ...displayTelemetry,
+        });
+      }, 1500);
     };
+
     img.onerror = () => {
       this.blobDiagnostics.imageError++;
       this.emitFrontendTelemetry("image_error", {
@@ -695,137 +857,10 @@ createStaticBackdropKeyframes: function(): void {
         foregroundState: this.getForegroundRenderState(current, img),
         ...displayTelemetry,
       });
+      this.revokePreparedBlobUrls(blobUrls);
     };
+
     img.src = url;
-    current.appendChild(img);
-    this.emitFrontendTelemetry("render_start", {
-      filename: target.filename,
-      photoId: target.id,
-      hasFocalPoint: !!focalPoint,
-      debugAlwaysStaticImage: this.config.debugAlwaysStaticImage === true,
-      ...displayTelemetry,
-    });
-
-    // Clear any existing animation
-    back.style.animation = 'none';
-    back.offsetHeight; // Force reflow
-    this.createStaticBackdropKeyframes();
-    // Apply backdrop fade animation
-    const totalDuration = this.config.updateInterval / 1000; // e.g., 30s
-    // Apply backdrop animation with proper 3-phase timing
-    back.style.animation = `backdrop-cycle ${totalDuration}s linear forwards`;
-  
-    
-    // ==================== LEFT MARGIN SUPPORT WITH CLIPPING WRAPPER ==================== 
-    if (this.config.leftMargin) {
-      // Create or get the clipping wrapper
-      let clipWrapper = document.getElementById("ONEDRIVE_PHOTO_CLIP_WRAPPER");
-      if (!clipWrapper) {
-        clipWrapper = document.createElement("div");
-        clipWrapper.id = "ONEDRIVE_PHOTO_CLIP_WRAPPER";
-        clipWrapper.style.position = "absolute";
-        clipWrapper.style.overflow = "hidden";
-        clipWrapper.style.top = "10px";
-        clipWrapper.style.bottom = "10px";
-        
-        // Insert wrapper and move current inside it
-        const parent = current.parentNode;
-        parent.insertBefore(clipWrapper, current);
-        clipWrapper.appendChild(current);
-      }
-      
-      // Set wrapper boundaries to respect left margin
-      clipWrapper.style.left = this.config.leftMargin;
-      clipWrapper.style.right = "10px";
-      
-      // Reset current element positioning since it's now inside wrapper
-      current.style.left = "0";
-      current.style.right = "0";
-      current.style.top = "0";
-      current.style.bottom = "0";
-      current.style.width = "100%";
-      current.style.height = "100%";
-      current.style.overflow = "";
-      
-    } else {
-      // Remove wrapper if no left margin needed
-      const clipWrapper = document.getElementById("ONEDRIVE_PHOTO_CLIP_WRAPPER");
-      if (clipWrapper) {
-        const parent = clipWrapper.parentNode;
-        parent.insertBefore(current, clipWrapper);
-        parent.removeChild(clipWrapper);
-        
-        // Reset current element to original positioning
-        current.style.left = "10px";
-        current.style.right = "10px";
-        current.style.top = "10px";
-        current.style.bottom = "10px";
-      }
-    }
-    
-    // ==================== KEN BURNS EFFECT ==================== 
-    if (this.config.kenBurnsEffect !== false) { // Default to enabled unless explicitly disabled
-      if (this.config.debugAlwaysStaticImage === true) {
-        this.applyCSSKenBurns(current, 50, 50, target, totalDuration, null, {
-          type: 'static',
-          reason: 'debug_always_static_image',
-        });
-      } else if (focalPoint) {
-        // Get image dimensions from photo metadata for pixel-to-percentage conversion
-        const imageWidth = Number(target.mediaMetadata?.width);
-        const imageHeight = Number(target.mediaMetadata?.height);
-        
-        if (imageWidth && imageHeight) {
-          // Convert pixel coordinates to percentages (backend sends pixels, we need percentages)
-          const focalCenterX = (focalPoint.x + focalPoint.width / 2) / imageWidth;
-          const focalCenterY = (focalPoint.y + focalPoint.height / 2) / imageHeight;
-          
-          let cropX = focalCenterX * 100;
-          let cropY = focalCenterY * 100;
-          
-          // Ensure crop center is within reasonable bounds
-          cropX = Math.max(20, Math.min(80, cropX));
-          cropY = Math.max(20, Math.min(80, cropY));
-          
-          console.log(`[MMM-OneDrive] Using face-detected focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
-          this.applyKenBurnsAnimation(current, cropX, cropY, target, focalPoint, visionResults);
-        } else {
-          console.warn(`[MMM-OneDrive] Missing image dimensions for focal point conversion, using random`);
-          // Fallback to random if no image dimensions
-          const cropX = Math.random() * 60 + 20;
-          const cropY = Math.random() * 60 + 20;
-          this.applyKenBurnsAnimation(current, cropX, cropY, target, focalPoint, visionResults);
-        }
-      } else {
-        // Generate random crop position for Ken Burns effect (fallback)
-        const cropX = Math.random() * 60 + 20; // 20% to 80% (avoid edges)
-        const cropY = Math.random() * 60 + 20; // 20% to 80% (avoid edges)
-        
-        console.log(`[MMM-OneDrive] Using random focal point: ${cropX.toFixed(1)}%, ${cropY.toFixed(1)}%`);
-        this.applyKenBurnsAnimation(current, cropX, cropY, target, null, visionResults);
-      }
-    } else {
-      // Ken Burns disabled - use normal fade animation
-      current.style.removeProperty('animation');
-      current.style.removeProperty('overflow');
-      // Allow the default .animated class to apply the trans animation
-    }
-    
-    this.applyCommonStyling(current, target, album, startDt, this.config.kenBurnsEffect !== false, visionResults);
-
-    setTimeout(() => {
-      if (!current.contains(img)) return;
-      this.emitFrontendTelemetry("foreground_style_snapshot", {
-        filename: target.filename,
-        photoId: target.id,
-        elapsedMs: new Date().getTime() - startDt.getTime(),
-        naturalWidth: img.naturalWidth,
-        naturalHeight: img.naturalHeight,
-        foregroundState: this.getForegroundRenderState(current, img),
-        ...displayTelemetry,
-      });
-    }, 1500);
-
   },
 
   // ==================== MAIN ANIMATION LOGIC ====================
