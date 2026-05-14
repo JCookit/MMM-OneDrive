@@ -76,9 +76,11 @@ Expected healthy telemetry:
 - `foreground_swap_committed`.
 - `image_load` with nonzero `naturalWidth` and `naturalHeight`.
 - `foreground_style_snapshot` without needing to stop the backend.
+- `dom_mutation` events showing every foreground, backdrop, wrapper, info, and animation mutation in order.
 
 Unexpected signals:
 
 - `image_error` for normal JPEG/HEIC-converted payloads.
 - `foreground_swap_stale` frequently, which would imply overlapping display renders.
 - `mainRevoked` incrementing before `foreground_swap_committed`.
+- A `dom_mutation` event that clears foreground, changes animation, or changes backdrop at the same time the foreground disappears unexpectedly.

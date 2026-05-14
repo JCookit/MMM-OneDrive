@@ -236,6 +236,7 @@ Module.register<Config>("MMM-OneDrive", {
   socketNotificationReceived: function (noti, payload) {
     if (noti === "ERROR") {
       const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
+      this.emitDomMutationTelemetry("error_clear_foreground", { notification: noti });
       current.textContent = "";
       const errMsgContainer = document.createElement("div");
       Object.assign(errMsgContainer.style, {
@@ -251,6 +252,7 @@ Module.register<Config>("MMM-OneDrive", {
       });
       errMsgDiv.textContent = payload;
       errMsgContainer.appendChild(errMsgDiv);
+      this.emitDomMutationTelemetry("error_append_message", { notification: noti });
       current.appendChild(errMsgContainer);
     }
     if (noti === "SCAN_COMPLETE") {
@@ -260,11 +262,13 @@ Module.register<Config>("MMM-OneDrive", {
     }
     if (noti === "CLEAR_ERROR") {
       const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
+      this.emitDomMutationTelemetry("clear_error_clear_foreground", { notification: noti });
       current.textContent = "";
       this.requestNextPhoto();
     }
     if (noti === "UPDATE_STATUS") {
       const info = document.getElementById("ONEDRIVE_PHOTO_INFO");
+      this.emitDomMutationTelemetry("update_status_info", { notification: noti, statusText: String(payload) });
       info.innerHTML = String(payload);
     }
     if (noti === "NO_PHOTO") {
@@ -341,6 +345,13 @@ Module.register<Config>("MMM-OneDrive", {
 
     console.log("[MMM-OneDrive] FRONTEND_TELEMETRY:", JSON.stringify(telemetry));
     this.sendSocketNotification("FRONTEND_TELEMETRY", telemetry);
+  },
+
+  emitDomMutationTelemetry: function(action: string, payload: Record<string, any> = {}) {
+    this.emitFrontendTelemetry("dom_mutation", {
+      action,
+      ...payload,
+    });
   },
 
   getBinaryPayloadSize: function(payload: any): number {
@@ -735,10 +746,21 @@ createStaticBackdropKeyframes: function(): void {
           clipWrapper.style.bottom = "10px";
 
           const parent = current.parentNode;
+          this.emitDomMutationTelemetry("create_clip_wrapper", {
+            filename: target.filename,
+            photoId: target.id,
+            ...displayTelemetry,
+          });
           parent.insertBefore(clipWrapper, current);
           clipWrapper.appendChild(current);
         }
 
+        this.emitDomMutationTelemetry("apply_clip_wrapper_layout", {
+          filename: target.filename,
+          photoId: target.id,
+          leftMargin: this.config.leftMargin,
+          ...displayTelemetry,
+        });
         clipWrapper.style.left = this.config.leftMargin;
         clipWrapper.style.right = "10px";
         current.style.left = "0";
@@ -752,6 +774,11 @@ createStaticBackdropKeyframes: function(): void {
         const clipWrapper = document.getElementById("ONEDRIVE_PHOTO_CLIP_WRAPPER");
         if (clipWrapper) {
           const parent = clipWrapper.parentNode;
+          this.emitDomMutationTelemetry("remove_clip_wrapper", {
+            filename: target.filename,
+            photoId: target.id,
+            ...displayTelemetry,
+          });
           parent.insertBefore(current, clipWrapper);
           parent.removeChild(clipWrapper);
 
@@ -762,14 +789,47 @@ createStaticBackdropKeyframes: function(): void {
         }
       }
 
+      this.emitDomMutationTelemetry("foreground_clear", {
+        filename: target.filename,
+        photoId: target.id,
+        ...displayTelemetry,
+      });
       current.textContent = "";
+      this.emitDomMutationTelemetry("foreground_append_image", {
+        filename: target.filename,
+        photoId: target.id,
+        foregroundState: this.getForegroundRenderState(current, img),
+        ...displayTelemetry,
+      });
       current.appendChild(img);
 
+      this.emitDomMutationTelemetry("backdrop_clear", {
+        filename: target.filename,
+        photoId: target.id,
+        ...displayTelemetry,
+      });
       back.style.backgroundImage = "";
+      this.emitDomMutationTelemetry("backdrop_set_image", {
+        filename: target.filename,
+        photoId: target.id,
+        ...displayTelemetry,
+      });
       back.style.backgroundImage = `url(${url})`;
+      this.emitDomMutationTelemetry("backdrop_animation_reset", {
+        filename: target.filename,
+        photoId: target.id,
+        ...displayTelemetry,
+      });
       back.style.animation = 'none';
       back.offsetHeight;
       this.createStaticBackdropKeyframes();
+      this.emitDomMutationTelemetry("backdrop_animation_start", {
+        filename: target.filename,
+        photoId: target.id,
+        animationName: "backdrop-cycle",
+        animationDuration: `${totalDuration}s`,
+        ...displayTelemetry,
+      });
       back.style.animation = `backdrop-cycle ${totalDuration}s linear forwards`;
 
       if (this.config.kenBurnsEffect !== false) {
@@ -808,6 +868,11 @@ createStaticBackdropKeyframes: function(): void {
           this.applyKenBurnsAnimation(current, cropX, cropY, target, null, visionResults);
         }
       } else {
+        this.emitDomMutationTelemetry("foreground_animation_clear", {
+          filename: target.filename,
+          photoId: target.id,
+          ...displayTelemetry,
+        });
         current.style.removeProperty('animation');
         current.style.removeProperty('overflow');
       }
@@ -898,11 +963,19 @@ createStaticBackdropKeyframes: function(): void {
     
     // Cancel any existing animation
     if (current.kenBurnsAnimation) {
+      this.emitDomMutationTelemetry("foreground_animation_cancel", {
+        filename: target.filename,
+        animationType: animationType?.type || 'static',
+      });
       current.kenBurnsAnimation.cancel();
       delete current.kenBurnsAnimation;
     }
     
     // Reset img element to clean state
+    this.emitDomMutationTelemetry("foreground_image_animation_reset", {
+      filename: target.filename,
+      animationType: animationType?.type || 'static',
+    });
     imgElement.style.animation = 'none';
     imgElement.style.opacity = '1';
     imgElement.style.transform = '';
@@ -918,6 +991,12 @@ createStaticBackdropKeyframes: function(): void {
     switch (animationType?.type || 'static') {
       case 'static':
         // Static animation - just fade in/out, no movement
+        this.emitDomMutationTelemetry("foreground_animation_start", {
+          filename: target.filename,
+          animationName: "ken-burns-static",
+          animationDuration: `${totalDuration}s`,
+          animationReason: animationType.reason,
+        });
         imgElement.style.animation = `ken-burns-static ${totalDuration}s linear forwards`;
         console.debug(`[MMM-OneDrive] Applied static animation (${animationType.reason})`);
         break;
@@ -942,6 +1021,12 @@ createStaticBackdropKeyframes: function(): void {
         
       default:
         // Fallback to static
+        this.emitDomMutationTelemetry("foreground_animation_start", {
+          filename: target.filename,
+          animationName: "ken-burns-static",
+          animationDuration: `${totalDuration}s`,
+          animationReason: animationType?.reason || "unknown_animation_type",
+        });
         imgElement.style.animation = `ken-burns-static ${totalDuration}s linear forwards`;
         console.warn(`[MMM-OneDrive] Unknown animation type: ${animationType?.type}, using static`);
     }
@@ -1019,8 +1104,16 @@ createStaticBackdropKeyframes: function(): void {
       imgElement.style.setProperty('--mid-x', `${midTranslateX}%`);
       imgElement.style.setProperty('--mid-y', `${midTranslateY}%`);
       
+      this.emitDomMutationTelemetry("foreground_animation_start", {
+        animationName: "ken-burns-zoom-out-fast",
+        animationDuration: `${totalDuration}s`,
+      });
       imgElement.style.animation = `ken-burns-zoom-out-fast ${totalDuration}s ease-out forwards`;
     } else {
+      this.emitDomMutationTelemetry("foreground_animation_start", {
+        animationName: "ken-burns-zoom-out",
+        animationDuration: `${totalDuration}s`,
+      });
       imgElement.style.animation = `ken-burns-zoom-out ${totalDuration}s linear forwards`;
     }
   },
@@ -1056,6 +1149,10 @@ createStaticBackdropKeyframes: function(): void {
     imgElement.style.setProperty('--end-x', `${endTranslateX}%`);
     imgElement.style.setProperty('--end-y', `${endTranslateY}%`);
     
+    this.emitDomMutationTelemetry("foreground_animation_start", {
+      animationName: "ken-burns-zoom-in",
+      animationDuration: `${totalDuration}s`,
+    });
     imgElement.style.animation = `ken-burns-zoom-in ${totalDuration}s linear forwards`;
   },
 
@@ -1064,6 +1161,10 @@ createStaticBackdropKeyframes: function(): void {
     
     // Only add animated class if Ken Burns is not active (to avoid animation conflicts)
     if (!kenBurnsActive) {
+      this.emitDomMutationTelemetry("foreground_add_animated_class", {
+        filename: target.filename,
+        photoId: target.id,
+      });
       current.classList.add("animated");
     }
     
@@ -1092,6 +1193,10 @@ createStaticBackdropKeyframes: function(): void {
       info.style.setProperty("--bottom", "10px");
       info.style.setProperty("--right", "10px");
     }
+    this.emitDomMutationTelemetry("info_clear", {
+      filename: target.filename,
+      photoId: target.id,
+    });
     info.innerHTML = "";
     
     const photoTime = document.createElement("div");
@@ -1144,6 +1249,11 @@ createStaticBackdropKeyframes: function(): void {
     if (photoLocation.innerHTML) {
       infoText.appendChild(photoLocation);
     }
+    this.emitDomMutationTelemetry("info_append_text", {
+      filename: target.filename,
+      photoId: target.id,
+      hasLocation: !!photoLocation.innerHTML,
+    });
     info.appendChild(infoText);
     console.debug("[MMM-OneDrive] render image done",
       JSON.stringify({
