@@ -1153,24 +1153,9 @@ createStaticBackdropKeyframes: function(): void {
       clearTimeout(this.displayTimer);
       this.displayTimer = null;
     }
-    
-    // Clean up blob URLs to free memory
-    if (this.currentBlobUrl) {
-      URL.revokeObjectURL(this.currentBlobUrl);
-      this.currentBlobUrl = null;
-      console.debug("[MMM-OneDrive] 🗑️ Main blob URL cleaned up during suspend");
-    }
-    
-    if (this.currentDebugBlobUrl) {
-      URL.revokeObjectURL(this.currentDebugBlobUrl);
-      this.currentDebugBlobUrl = null;
-      console.debug("[MMM-OneDrive] 🗑️ Debug blob URL cleaned up during suspend");
-    }
-    
+
     this.sendSocketNotification("MODULE_SUSPENDED", undefined);
     this.suspended = true;
-    const info = document.getElementById("ONEDRIVE_PHOTO_INFO");
-    info.innerHTML = "";
   },
 
   resume() {
