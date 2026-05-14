@@ -342,6 +342,55 @@ Module.register<Config>("MMM-OneDrive", {
     this.sendSocketNotification("FRONTEND_TELEMETRY", telemetry);
   },
 
+  getBinaryPayloadSize: function(payload: any): number {
+    if (!payload) return 0;
+    if (typeof payload.length === "number") return payload.length;
+    if (typeof payload.byteLength === "number") return payload.byteLength;
+    if (Array.isArray(payload.data)) return payload.data.length;
+    if (typeof payload.buffer?.byteLength === "number") return payload.buffer.byteLength;
+    return 0;
+  },
+
+  getForegroundRenderState: function(current: HTMLElement, img: HTMLImageElement) {
+    const currentStyle = window.getComputedStyle(current);
+    const imageStyle = window.getComputedStyle(img);
+    const currentRect = current.getBoundingClientRect();
+    const imageRect = img.getBoundingClientRect();
+
+    return {
+      current: {
+        display: currentStyle.display,
+        opacity: currentStyle.opacity,
+        visibility: currentStyle.visibility,
+        zIndex: currentStyle.zIndex,
+        overflow: currentStyle.overflow,
+        animationName: currentStyle.animationName,
+        animationDuration: currentStyle.animationDuration,
+        rect: {
+          width: Math.round(currentRect.width),
+          height: Math.round(currentRect.height),
+          top: Math.round(currentRect.top),
+          left: Math.round(currentRect.left),
+        },
+      },
+      image: {
+        display: imageStyle.display,
+        opacity: imageStyle.opacity,
+        visibility: imageStyle.visibility,
+        objectFit: imageStyle.objectFit,
+        animationName: imageStyle.animationName,
+        animationDuration: imageStyle.animationDuration,
+        transform: imageStyle.transform,
+        rect: {
+          width: Math.round(imageRect.width),
+          height: Math.round(imageRect.height),
+          top: Math.round(imageRect.top),
+          left: Math.round(imageRect.left),
+        },
+      },
+    };
+  },
+
   displayCachedPhoto: function() {
     if (!this.photoCache) {
       console.warn("[MMM-OneDrive] ⚠ No cached photo available for display");
@@ -351,15 +400,17 @@ Module.register<Config>("MMM-OneDrive", {
     console.log("[MMM-OneDrive] 📺 Displaying cached photo:", this.photoCache.photo.filename);
     
     const { photo, photoBuffer, mimeType, album, interestingRectangleResult } = this.photoCache;
+    const photoBufferSize = this.getBinaryPayloadSize(photoBuffer);
+    const debugImageBufferSize = this.getBinaryPayloadSize(interestingRectangleResult?.debugImageBuffer);
     
     // Debug logging for troubleshooting
     console.debug("[MMM-OneDrive] Photo cache contents:", {
       hasPhotoBuffer: !!photoBuffer,
-      photoBufferSize: photoBuffer?.length || 0,
+      photoBufferSize,
       mimeType,
       hasInterestingRectangleResult: !!interestingRectangleResult,
       hasDebugImageBuffer: !!interestingRectangleResult?.debugImageBuffer,
-      debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0
+      debugImageBufferSize
     });
     
     // Convert raw buffer to Blob URL (more efficient than base64)
@@ -419,8 +470,8 @@ Module.register<Config>("MMM-OneDrive", {
       filename: photo.filename,
       photoId: photo.id,
       displaySequence,
-      photoBufferSize: photoBuffer?.length || 0,
-      debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0,
+      photoBufferSize,
+      debugImageBufferSize,
       mimeType,
       displayUrlKind,
       mainBlobUrlLength: url.length,
@@ -430,8 +481,8 @@ Module.register<Config>("MMM-OneDrive", {
     this.render(displayUrl, photo, album, interestingRectangleResult, {
       displaySequence,
       displayUrlKind,
-      photoBufferSize: photoBuffer?.length || 0,
-      debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0,
+      photoBufferSize,
+      debugImageBufferSize,
       mimeType,
     });
     this.blobDiagnostics.displays++;
@@ -439,8 +490,8 @@ Module.register<Config>("MMM-OneDrive", {
       filename: photo.filename,
       photoId: photo.id,
       displaySequence,
-      photoBufferSize: photoBuffer?.length || 0,
-      debugImageBufferSize: interestingRectangleResult?.debugImageBuffer?.length || 0,
+      photoBufferSize,
+      debugImageBufferSize,
       mimeType,
       displayUrlKind,
     });
@@ -631,6 +682,7 @@ createStaticBackdropKeyframes: function(): void {
         naturalWidth: img.naturalWidth,
         naturalHeight: img.naturalHeight,
         elapsedMs: new Date().getTime() - startDt.getTime(),
+        foregroundState: this.getForegroundRenderState(current, img),
         ...displayTelemetry,
       });
     };
@@ -640,6 +692,7 @@ createStaticBackdropKeyframes: function(): void {
         filename: target.filename,
         photoId: target.id,
         elapsedMs: new Date().getTime() - startDt.getTime(),
+        foregroundState: this.getForegroundRenderState(current, img),
         ...displayTelemetry,
       });
     };
@@ -759,6 +812,19 @@ createStaticBackdropKeyframes: function(): void {
     }
     
     this.applyCommonStyling(current, target, album, startDt, this.config.kenBurnsEffect !== false, visionResults);
+
+    setTimeout(() => {
+      if (!current.contains(img)) return;
+      this.emitFrontendTelemetry("foreground_style_snapshot", {
+        filename: target.filename,
+        photoId: target.id,
+        elapsedMs: new Date().getTime() - startDt.getTime(),
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+        foregroundState: this.getForegroundRenderState(current, img),
+        ...displayTelemetry,
+      });
+    }, 1500);
 
   },
 
