@@ -235,25 +235,7 @@ Module.register<Config>("MMM-OneDrive", {
 
   socketNotificationReceived: function (noti, payload) {
     if (noti === "ERROR") {
-      const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
-      this.emitDomMutationTelemetry("error_clear_foreground", { notification: noti });
-      current.textContent = "";
-      const errMsgContainer = document.createElement("div");
-      Object.assign(errMsgContainer.style, {
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
-        height: "100%",
-      });
-      const errMsgDiv = document.createElement("div");
-      Object.assign(errMsgDiv.style, {
-        maxWidth: "70vw",
-        fontSize: "1.5em",
-      });
-      errMsgDiv.textContent = payload;
-      errMsgContainer.appendChild(errMsgDiv);
-      this.emitDomMutationTelemetry("error_append_message", { notification: noti });
-      current.appendChild(errMsgContainer);
+      this.showErrorOverlay(String(payload));
     }
     if (noti === "SCAN_COMPLETE") {
       // make sure a photo request is queued
@@ -261,9 +243,7 @@ Module.register<Config>("MMM-OneDrive", {
       this.requestNextPhoto();
     }
     if (noti === "CLEAR_ERROR") {
-      const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
-      this.emitDomMutationTelemetry("clear_error_clear_foreground", { notification: noti });
-      current.textContent = "";
+      this.clearErrorOverlay("CLEAR_ERROR");
       this.requestNextPhoto();
     }
     if (noti === "UPDATE_STATUS") {
@@ -352,6 +332,53 @@ Module.register<Config>("MMM-OneDrive", {
       action,
       ...payload,
     });
+  },
+
+  clearErrorOverlay: function(reason: string) {
+    const overlay = document.getElementById("ONEDRIVE_PHOTO_ERROR");
+    if (!overlay) return;
+
+    this.emitDomMutationTelemetry("error_overlay_remove", { reason });
+    overlay.remove();
+  },
+
+  showErrorOverlay: function(message: string) {
+    const wrapper = document.getElementById("ONEDRIVE_PHOTO");
+    if (!wrapper) return;
+
+    let overlay = document.getElementById("ONEDRIVE_PHOTO_ERROR");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "ONEDRIVE_PHOTO_ERROR";
+      Object.assign(overlay.style, {
+        position: "absolute",
+        top: "10px",
+        left: "10px",
+        right: "10px",
+        bottom: "10px",
+        zIndex: "5",
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        pointerEvents: "none",
+      });
+      wrapper.appendChild(overlay);
+      this.emitDomMutationTelemetry("error_overlay_create");
+    }
+
+    overlay.textContent = "";
+    const errMsgDiv = document.createElement("div");
+    Object.assign(errMsgDiv.style, {
+      maxWidth: "70vw",
+      fontSize: "1.5em",
+      padding: "16px",
+      background: "rgba(0, 0, 0, 0.75)",
+      color: "white",
+      borderLeft: "4px solid #ff5555",
+    });
+    errMsgDiv.textContent = message;
+    overlay.appendChild(errMsgDiv);
+    this.emitDomMutationTelemetry("error_overlay_update", { message });
   },
 
   getBinaryPayloadSize: function(payload: any): number {

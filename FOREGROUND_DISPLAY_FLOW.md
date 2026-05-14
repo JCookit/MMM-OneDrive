@@ -33,7 +33,8 @@ Lifecycle and error paths:
 
 - `MODULE_SUSPENDED`: should stop display scheduling only. It must not clear the current photo or revoke its active blob URL.
 - `MODULE_RESUMED`: should resume scheduling only. It must not force a destructive rerender.
-- `ERROR` and `CLEAR_ERROR` intentionally mutate foreground DOM.
+- `ERROR` shows an independent `ONEDRIVE_PHOTO_ERROR` overlay and must not clear foreground photo DOM.
+- `CLEAR_ERROR` removes only `ONEDRIVE_PHOTO_ERROR`; auth success during normal thumbnail fetch must not blank the displayed photo.
 - `NO_PHOTO` only clears `processingRequested`.
 - `UPDATE_STATUS` only updates info text.
 
@@ -83,4 +84,5 @@ Unexpected signals:
 - `image_error` for normal JPEG/HEIC-converted payloads.
 - `foreground_swap_stale` frequently, which would imply overlapping display renders.
 - `mainRevoked` incrementing before `foreground_swap_committed`.
+- Any `dom_mutation` event from `CLEAR_ERROR` that touches foreground, backdrop, or animation state.
 - A `dom_mutation` event that clears foreground, changes animation, or changes backdrop at the same time the foreground disappears unexpectedly.
