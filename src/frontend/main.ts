@@ -9,8 +9,6 @@ import type { DriveItem } from "@microsoft/microsoft-graph-types";
  */
 declare const moment: typeof MomentLib;
 
-const NEXT_PHOTO_PREFETCH_DELAY_MS = 1500;
-
 // TypeScript interface extension for HTMLElement to store animation reference
 declare global {
   interface HTMLElement {
@@ -86,7 +84,6 @@ Module.register<Config>("MMM-OneDrive", {
     // Initialize photo caching system
     this.photoCache = null; // Will store: { photo, photoBuffer, mimeType, album, interestingRectangleResult }
     this.displayTimer = null;
-    this.nextPhotoRequestTimer = null;
     this.processingRequested = false;
     this.currentBlobUrl = null; // For blob URL cleanup
     this.currentDebugBlobUrl = null; // For debug image blob URL cleanup
@@ -298,10 +295,6 @@ Module.register<Config>("MMM-OneDrive", {
 
   // ==================== NEW CACHING SYSTEM ==================== 
   requestNextPhoto: function() {
-    if (this.nextPhotoRequestTimer) {
-      console.log("[MMM-OneDrive] Photo request already queued, skipping request");
-      return;
-    }
     if (this.processingRequested) {
       console.log("[MMM-OneDrive] Photo processing already in progress, skipping request");
       return;
@@ -310,19 +303,6 @@ Module.register<Config>("MMM-OneDrive", {
     this.processingRequested = true;
     console.log("[MMM-OneDrive] ➤ Requesting next photo from backend");
     this.sendSocketNotification("NEXT_PHOTO", []);
-  },
-
-  scheduleNextPhotoRequest: function(delayMs: number = NEXT_PHOTO_PREFETCH_DELAY_MS) {
-    if (this.nextPhotoRequestTimer || this.processingRequested) {
-      return;
-    }
-
-    console.log(`[MMM-OneDrive] ⏳ Next photo request queued in ${delayMs}ms`);
-    this.nextPhotoRequestTimer = setTimeout(() => {
-      this.nextPhotoRequestTimer = null;
-      if (this.suspended) return;
-      this.requestNextPhoto();
-    }, delayMs);
   },
 
   getRendererMemorySnapshot: function() {
@@ -516,8 +496,8 @@ Module.register<Config>("MMM-OneDrive", {
       displayUrlKind,
     });
     
-    // Let the foreground image get its first paint/fade before starting backend work.
-    this.scheduleNextPhotoRequest();
+    // Start next photo processing immediately after consuming cached photo
+    this.requestNextPhoto();
     
     // Schedule next display
     this.scheduleNextDisplay();
@@ -1172,10 +1152,6 @@ createStaticBackdropKeyframes: function(): void {
     if (this.displayTimer) {
       clearTimeout(this.displayTimer);
       this.displayTimer = null;
-    }
-    if (this.nextPhotoRequestTimer) {
-      clearTimeout(this.nextPhotoRequestTimer);
-      this.nextPhotoRequestTimer = null;
     }
     
     // Clean up blob URLs to free memory
