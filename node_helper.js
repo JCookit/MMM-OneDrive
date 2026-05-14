@@ -2411,12 +2411,20 @@ const nodeHelperObject = {
           writeCrashBreadcrumb('onedrive_thumbnail_url', photo, {
             thumbnailSize,
             thumbnailWidth: thumbnail.width || null,
-            thumbnailHeight: thumbnail.height || null
+            thumbnailHeight: thumbnail.height || null,
+            thumbnailSource: thumbnail.source || null
           });
 
-          const buf = await fetchToUint8Array(thumbnail.url);
-          buffer = Buffer.from(buf);
-          mimeTypeToSend = 'image/jpeg';
+          if (thumbnail.buffer) {
+            buffer = Buffer.from(thumbnail.buffer);
+            mimeTypeToSend = thumbnail.mimeType || 'image/jpeg';
+          } else if (thumbnail.url) {
+            const buf = await fetchToUint8Array(thumbnail.url);
+            buffer = Buffer.from(buf);
+            mimeTypeToSend = 'image/jpeg';
+          } else {
+            throw new Error('OneDrive thumbnail response had no URL or image buffer');
+          }
           oneDriveThumbnailSucceeded = true;
 
           if (photo.mediaMetadata) {
@@ -2428,13 +2436,17 @@ const nodeHelperObject = {
             thumbnailSize,
             outputBytes: buffer.length,
             outputWidth: thumbnail.width || null,
-            outputHeight: thumbnail.height || null
+            outputHeight: thumbnail.height || null,
+            thumbnailSource: thumbnail.source || null,
+            mimeType: mimeTypeToSend
           });
           pipelineTelemetry.mark('onedrive_thumbnail_fetched', {
             thumbnailSize,
             bufferBytes: buffer.length,
             outputWidth: thumbnail.width || null,
-            outputHeight: thumbnail.height || null
+            outputHeight: thumbnail.height || null,
+            thumbnailSource: thumbnail.source || null,
+            mimeType: mimeTypeToSend
           });
         } catch (thumbnailError) {
           oneDriveThumbnailFailed = true;

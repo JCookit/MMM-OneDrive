@@ -6,7 +6,7 @@
 
 const EventEmitter = require("events");
 const crypto = require("crypto");
-const { Client } = require("@microsoft/microsoft-graph-client");
+const { Client, ResponseType } = require("@microsoft/microsoft-graph-client");
 const { LogLevel } = require("@azure/msal-node");
 const ExifReader = require("exifreader");
 const Log = require("logger");
@@ -213,7 +213,7 @@ class OneDrivePhotos extends EventEmitter {
   /**
    * @param {OneDriveMediaItem} item
    * @param {string} size OneDrive thumbnail size, e.g. c1080x1920
-   * @returns {Promise<{url: string, width?: number, height?: number, size: string}>}
+   * @returns {Promise<{url?: string, buffer?: Buffer, mimeType?: string, width?: number, height?: number, size: string, source: string}>}
    */
   async getItemThumbnail(item, size) {
     if (!item?.id) {
@@ -234,38 +234,79 @@ class OneDrivePhotos extends EventEmitter {
 
     const attempts = [
       { label: size, url: `${userDriveEndpoint}/0/${encodeURIComponent(size)}`, responseType: "single" },
+      { label: size, url: `${userDriveEndpoint}/0/${encodeURIComponent(size)}/content`, responseType: "content" },
       { label: size, url: `${userDriveEndpoint}?select=${encodeURIComponent(size)}`, responseType: "collection" },
       { label: "large", url: `${userDriveEndpoint}/0/large`, responseType: "single" },
+      { label: "large", url: `${userDriveEndpoint}/0/large/content`, responseType: "content" },
     ].concat(driveSpecificEndpoint ? [
       { label: size, url: `${driveSpecificEndpoint}/0/${encodeURIComponent(size)}`, responseType: "single" },
+      { label: size, url: `${driveSpecificEndpoint}/0/${encodeURIComponent(size)}/content`, responseType: "content" },
       { label: size, url: `${driveSpecificEndpoint}?select=${encodeURIComponent(size)}`, responseType: "collection" },
       { label: "large", url: `${driveSpecificEndpoint}/0/large`, responseType: "single" },
+      { label: "large", url: `${driveSpecificEndpoint}/0/large/content`, responseType: "content" },
     ] : []);
 
     const errors = [];
     for (const attempt of attempts) {
       try {
-        const response = await this.request(`getItemThumbnail:${attempt.label}`, attempt.url, "get", null);
-        const thumbnail = attempt.responseType === "single"
-          ? response
-          : response?.value?.[0]?.[attempt.label];
-
-        if (thumbnail?.url) {
-          return {
-            url: thumbnail.url,
-            width: thumbnail.width,
-            height: thumbnail.height,
-            size: attempt.label,
-          };
+        const response = await this.requestRaw(`getItemThumbnail:${attempt.label}`, attempt.url);
+        const parsed = await this.parseThumbnailResponse(attempt, response);
+        if (parsed) {
+          return parsed;
         }
-
-        errors.push(`${attempt.label}: no url returned`);
+        errors.push(`${attempt.label}: no usable thumbnail returned`);
       } catch (error) {
         errors.push(`${attempt.label}: ${error.message}`);
       }
     }
 
     throw new Error(`No OneDrive thumbnail URL returned (${errors.join("; ")})`);
+  }
+
+  async requestRaw(logContext, url) {
+    this.logDebug((logContext ? `[${logContext}]` : "") + ` request raw URL: ${url}`);
+    return await this.#graphClient.api(url).responseType(ResponseType.RAW).get();
+  }
+
+  async parseThumbnailResponse(attempt, response) {
+    const contentType = (response.headers?.get("content-type") || "").toLowerCase();
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`${response.status} ${response.statusText || ""}${text ? ` ${text.slice(0, 160)}` : ""}`.trim());
+    }
+
+    if (contentType.startsWith("image/")) {
+      const arrayBuffer = await response.arrayBuffer();
+      return {
+        buffer: Buffer.from(arrayBuffer),
+        mimeType: contentType.split(";")[0],
+        size: attempt.label,
+        source: "content",
+      };
+    }
+
+    if (contentType.includes("application/json") || contentType.includes("text/json")) {
+      const responseJson = await response.json();
+      const thumbnail = attempt.responseType === "single"
+        ? responseJson
+        : responseJson?.value?.[0]?.[attempt.label];
+
+      if (thumbnail?.url) {
+        return {
+          url: thumbnail.url,
+          width: thumbnail.width,
+          height: thumbnail.height,
+          size: attempt.label,
+          source: "url",
+        };
+      }
+
+      return null;
+    }
+
+    const text = await response.text();
+    throw new Error(`unsupported response ${contentType || "<none>"}${text ? ` ${text.slice(0, 160)}` : ""}`);
   }
 
   /**
