@@ -1228,6 +1228,8 @@ const nodeHelperObject = {
       return;
     }
 
+    const spawnedWorker = this.resizeWorker;
+
     this.resizeWorker.stdout.on('data', (data) => {
       for (const line of data.toString().trim().split('\n')) {
         if (line.trim()) {
@@ -1250,14 +1252,18 @@ const nodeHelperObject = {
 
     this.resizeWorker.on('exit', (code, signal) => {
       console.error(`[NodeHelper] Resize worker exited: code=${code}, signal=${signal}`);
-      this.resizeWorkerReady = false;
-      this.resizeWorkerBusy = false;
-      this.rejectAllResizeRequests(new Error(`Resize worker exited: code=${code}, signal=${signal}`));
+      const isCurrentWorker = this.resizeWorker === spawnedWorker;
 
-      if (code !== 0 && !this.shuttingDown) {
+      if (isCurrentWorker) {
+        this.resizeWorkerReady = false;
+        this.resizeWorkerBusy = false;
+        this.resizeWorker = null;
+        this.rejectAllResizeRequests(new Error(`Resize worker exited: code=${code}, signal=${signal}`));
+      }
+
+      if (code !== 0 && !this.shuttingDown && !this.resizeWorkerRestarting && isCurrentWorker) {
         console.log("[NodeHelper] Restarting resize worker in 1 second...");
         setTimeout(() => {
-          this.resizeWorker = null;
           this.initializeResizeWorker();
         }, 1000);
       }
