@@ -19,11 +19,14 @@ export type Config = {
   showWidth: number;
   showHeight: number;
   imageResize?: {
-    backend?: "sharp" | "canvas" | "onedriveThumbnail";
+    backend?: "sharp" | "sharpWorker" | "canvas" | "onedriveThumbnail";
     sharpCache?: boolean;
     sharpConcurrency?: number;
+    workerTimeoutMs?: number;
+    workerMaxJobs?: number;
+    workerMaxRssMB?: number;
   };
-  resizeBackend?: "sharp" | "canvas" | "onedriveThumbnail";
+  resizeBackend?: "sharp" | "sharpWorker" | "canvas" | "onedriveThumbnail";
   timeFormat: string;
   forceAuthInteractive: boolean;
   autoInfoPosition: AutoInfoPositionFunction;

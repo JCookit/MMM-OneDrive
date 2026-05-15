@@ -35,9 +35,12 @@ Module.register<Config>("MMM-OneDrive", {
     showWidth: 1080, // These values will be used for quality of downloaded photos to show. real size to show in your MagicMirror region is recommended.
     showHeight: 1920,
     imageResize: {
-      backend: "sharp", // "sharp" uses lower-memory native resizing; "canvas" is available as a rollback.
+      backend: "sharp", // "sharp", "sharpWorker", "canvas", or "onedriveThumbnail".
       sharpCache: false,
       sharpConcurrency: 1,
+      workerTimeoutMs: 15000,
+      workerMaxJobs: 100,
+      workerMaxRssMB: 750,
     },
     timeFormat: "YYYY/MM/DD HH:mm",
     autoInfoPosition: false,
@@ -468,6 +471,7 @@ Module.register<Config>("MMM-OneDrive", {
     console.log("[MMM-OneDrive] 📺 Displaying cached photo:", this.photoCache.photo.filename);
     
     const { photo, photoBuffer, mimeType, album, interestingRectangleResult } = this.photoCache;
+    const displayMode = this.photoCache.displayMode || "normal";
     const photoBufferSize = this.getBinaryPayloadSize(photoBuffer);
     const debugImageBufferSize = this.getBinaryPayloadSize(interestingRectangleResult?.debugImageBuffer);
     
@@ -478,7 +482,8 @@ Module.register<Config>("MMM-OneDrive", {
       mimeType,
       hasInterestingRectangleResult: !!interestingRectangleResult,
       hasDebugImageBuffer: !!interestingRectangleResult?.debugImageBuffer,
-      debugImageBufferSize
+      debugImageBufferSize,
+      displayMode
     });
     
     const previousMainBlobUrl = this.currentBlobUrl;
@@ -526,6 +531,7 @@ Module.register<Config>("MMM-OneDrive", {
       photoBufferSize,
       debugImageBufferSize,
       mimeType,
+      displayMode,
       displayUrlKind,
       mainBlobUrlLength: url.length,
       debugBlobUrlLength: debugBlobUrl?.length || 0,
@@ -537,6 +543,7 @@ Module.register<Config>("MMM-OneDrive", {
       photoBufferSize,
       debugImageBufferSize,
       mimeType,
+      displayMode,
     }, {
       mainBlobUrl: url,
       debugBlobUrl,
@@ -552,6 +559,7 @@ Module.register<Config>("MMM-OneDrive", {
       photoBufferSize,
       debugImageBufferSize,
       mimeType,
+      displayMode,
       displayUrlKind,
     });
     
@@ -727,6 +735,7 @@ createStaticBackdropKeyframes: function(): void {
     const current = document.getElementById("ONEDRIVE_PHOTO_CURRENT");
     const renderGeneration = ++this.renderGeneration;
     const totalDuration = this.config.updateInterval / 1000;
+    const forceOriginalStatic = displayTelemetry?.displayMode === "originalStatic";
 
     const img = document.createElement("img");
     img.style.width = "100%";
@@ -739,6 +748,7 @@ createStaticBackdropKeyframes: function(): void {
       photoId: target.id,
       hasFocalPoint: !!focalPoint,
       debugAlwaysStaticImage: this.config.debugAlwaysStaticImage === true,
+      forceOriginalStatic,
       ...displayTelemetry,
     });
 
@@ -852,17 +862,49 @@ createStaticBackdropKeyframes: function(): void {
       });
       back.style.animation = 'none';
       back.offsetHeight;
-      this.createStaticBackdropKeyframes();
-      this.emitDomMutationTelemetry("backdrop_animation_start", {
-        filename: target.filename,
-        photoId: target.id,
-        animationName: "backdrop-cycle",
-        animationDuration: `${totalDuration}s`,
-        ...displayTelemetry,
-      });
-      back.style.animation = `backdrop-cycle ${totalDuration}s linear forwards`;
+      if (forceOriginalStatic) {
+        this.emitDomMutationTelemetry("backdrop_animation_suppressed", {
+          filename: target.filename,
+          photoId: target.id,
+          reason: "original_static_fallback",
+          ...displayTelemetry,
+        });
+      } else {
+        this.createStaticBackdropKeyframes();
+        this.emitDomMutationTelemetry("backdrop_animation_start", {
+          filename: target.filename,
+          photoId: target.id,
+          animationName: "backdrop-cycle",
+          animationDuration: `${totalDuration}s`,
+          ...displayTelemetry,
+        });
+        back.style.animation = `backdrop-cycle ${totalDuration}s linear forwards`;
+      }
 
-      if (this.config.kenBurnsEffect !== false) {
+      if (forceOriginalStatic) {
+        if (current.kenBurnsAnimation) {
+          this.emitDomMutationTelemetry("foreground_animation_cancel", {
+            filename: target.filename,
+            animationType: "original_static_fallback",
+          });
+          current.kenBurnsAnimation.cancel();
+          delete current.kenBurnsAnimation;
+        }
+
+        this.emitDomMutationTelemetry("foreground_animation_suppressed", {
+          filename: target.filename,
+          photoId: target.id,
+          reason: "original_static_fallback",
+          ...displayTelemetry,
+        });
+        current.style.removeProperty('animation');
+        current.style.overflow = 'hidden';
+        current.classList.remove("animated");
+        img.style.animation = 'none';
+        img.style.opacity = '1';
+        img.style.transform = 'none';
+        img.style.willChange = 'auto';
+      } else if (this.config.kenBurnsEffect !== false) {
         if (this.config.debugAlwaysStaticImage === true) {
           this.applyCSSKenBurns(current, 50, 50, target, totalDuration, null, {
             type: 'static',
@@ -907,7 +949,7 @@ createStaticBackdropKeyframes: function(): void {
         current.style.removeProperty('overflow');
       }
 
-      this.applyCommonStyling(current, target, album, startDt, this.config.kenBurnsEffect !== false, visionResults);
+      this.applyCommonStyling(current, target, album, startDt, forceOriginalStatic || this.config.kenBurnsEffect !== false, visionResults);
       this.commitPreparedBlobUrls(blobUrls);
 
       this.emitFrontendTelemetry("foreground_swap_committed", {
