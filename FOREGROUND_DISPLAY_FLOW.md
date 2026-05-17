@@ -2,7 +2,9 @@
 
 ## Current State
 
-As of 2026-05-14, MMM-OneDrive is testing `imageResize.backend: "onedriveThumbnail"` to avoid local resize work while preserving immediate photo prefetch. The module also has foreground telemetry enabled:
+As of 2026-05-15, MMM-OneDrive is testing local resize isolation on branch `resize-worker-isolation`. The stable comparison path is still `imageResize.backend: "onedriveThumbnail"`, which avoids local resize work while preserving immediate photo prefetch. The new experimental path is `imageResize.backend: "sharpWorker"`, which fetches the original image but performs Sharp resize in `src/resize/resize-worker.js` instead of the MagicMirror/Electron helper process.
+
+The module has foreground telemetry enabled:
 
 - `blob_prepared`
 - `render_start`
@@ -26,10 +28,25 @@ Normal display:
 
 1. Backend receives `NEXT_PHOTO`.
 2. Backend `processNextPhotoRequest()` selects `localPhotoList[uiPhotoIndex]`.
-3. Backend `prepareShowPhoto()` fetches/resizes or fetches OneDrive thumbnail, runs vision, then sends `RENDER_PHOTO`.
+3. Backend `prepareShowPhoto()` fetches/resizes or fetches OneDrive thumbnail, runs vision when allowed, then sends `RENDER_PHOTO`.
 4. Frontend `RENDER_PHOTO` caches the payload.
 5. If no display timer exists, frontend displays immediately; otherwise it waits for `displayTimer`.
 6. Frontend `displayCachedPhoto()` creates blob URLs, renders the cached photo, immediately requests the next backend photo, and schedules the next display timer.
+
+Resize paths:
+
+- `imageResize.backend: "onedriveThumbnail"` asks Microsoft Graph for a display-sized thumbnail. If Graph fails, existing fallback behavior fetches the full image and uses in-process Sharp.
+- `imageResize.backend: "sharp"` fetches the full image and resizes in the node helper process.
+- `imageResize.backend: "canvas"` fetches the full image and resizes in the node helper process with Canvas.
+- `imageResize.backend: "sharpWorker"` fetches the full image in the node helper, sends the buffer over Node IPC to `src/resize/resize-worker.js`, and receives a display-sized JPEG buffer back. The worker is bounded by `workerTimeoutMs`, recycled after `workerMaxJobs`, and recycled if worker RSS crosses `workerMaxRssMB`.
+
+Sharp worker fallback:
+
+1. If the sharp worker is missing, busy, crashes, times out, or returns an invalid buffer, backend keeps the original full-size fetched buffer.
+2. Backend marks the payload `displayMode: "originalStatic"`.
+3. Backend skips vision for that photo so the original full-size image is not sent to OpenCV.
+4. Frontend displays the original image with `object-fit: contain`, suppresses foreground Ken Burns/static fade animation, and suppresses backdrop fade animation for that photo.
+5. Slideshow timing and immediate prefetch continue unchanged.
 
 Lifecycle and error paths:
 
@@ -85,6 +102,8 @@ Error display now uses a separate `ONEDRIVE_PHOTO_ERROR` overlay. `ERROR` create
 Expected healthy telemetry:
 
 - `blob_prepared` with nonzero `photoBufferSize`.
+- `PIPELINE_TELEMETRY.configuredSize.resizeBackend` matching the tested backend.
+- For `sharpWorker`, `resized.resizeWorker.pid` and worker memory in backend pipeline telemetry.
 - `render_start`.
 - `foreground_swap_ready`.
 - `foreground_swap_committed`.
@@ -99,3 +118,4 @@ Unexpected signals:
 - `mainRevoked` incrementing before `foreground_swap_committed`.
 - If `debugDomTelemetry: true`, any `dom_mutation` event from `CLEAR_ERROR` that touches foreground, backdrop, or animation state.
 - If `debugDomTelemetry: true`, a `dom_mutation` event that clears foreground, changes animation, or changes backdrop at the same time the foreground disappears unexpectedly.
+- For `sharpWorker`, unexpected `displayMode: "originalStatic"` means resize worker fallback was used. That should keep photos visible, but it is a fault signal for the resize path.

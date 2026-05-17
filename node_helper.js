@@ -149,6 +149,9 @@ const DEFAULT_VISION_HEALTH_TIMEOUT_MS = 2000;
 const VISION_HEALTH_INTERVAL_MS = 30000;
 const MEMORY_TELEMETRY_INTERVAL = 10;
 const DEFAULT_RESIZE_BACKEND = 'sharp';
+const DEFAULT_RESIZE_WORKER_TIMEOUT_MS = 15000;
+const DEFAULT_RESIZE_WORKER_MAX_JOBS = 100;
+const DEFAULT_RESIZE_WORKER_MAX_RSS_MB = 750;
 const CRASH_BREADCRUMB_PATH = path.resolve(__dirname, 'cache', 'crash-breadcrumbs.log');
 
 function writeCrashBreadcrumb(stage, photo, extra = {}) {
@@ -179,17 +182,31 @@ function getResizeConfig(config = {}) {
   const backend = String(
     resizeConfig.backend || config.resizeBackend || DEFAULT_RESIZE_BACKEND
   ).toLowerCase();
+  const workerTimeoutMs = Number(resizeConfig.workerTimeoutMs);
+  const workerMaxJobs = Number(resizeConfig.workerMaxJobs);
+  const workerMaxRssMB = Number(resizeConfig.workerMaxRssMB);
 
   return {
     backend: backend === 'canvas'
       ? 'canvas'
       : backend === 'onedrivethumbnail'
         ? 'onedriveThumbnail'
-        : 'sharp',
+        : backend === 'sharpworker'
+          ? 'sharpWorker'
+          : 'sharp',
     sharpCache: resizeConfig.sharpCache !== undefined ? resizeConfig.sharpCache !== false : false,
     sharpConcurrency: Number.isFinite(Number(resizeConfig.sharpConcurrency))
       ? Math.max(1, Math.floor(Number(resizeConfig.sharpConcurrency)))
-      : 1
+      : 1,
+    workerTimeoutMs: Number.isFinite(workerTimeoutMs)
+      ? Math.max(1000, Math.floor(workerTimeoutMs))
+      : DEFAULT_RESIZE_WORKER_TIMEOUT_MS,
+    workerMaxJobs: Number.isFinite(workerMaxJobs)
+      ? Math.max(1, Math.floor(workerMaxJobs))
+      : DEFAULT_RESIZE_WORKER_MAX_JOBS,
+    workerMaxRssMB: Number.isFinite(workerMaxRssMB)
+      ? Math.max(128, Math.floor(workerMaxRssMB))
+      : DEFAULT_RESIZE_WORKER_MAX_RSS_MB
   };
 }
 
@@ -251,6 +268,10 @@ async function resizeImageCarefully(imageBuffer, photo, config) {
 
   if (resizeConfig.backend === 'sharp') {
     return resizeImageWithSharp(imageBuffer, photo, config);
+  }
+
+  if (resizeConfig.backend === 'sharpWorker') {
+    throw new Error('sharpWorker backend requires node helper worker management');
   }
 
   return resizeImageWithCanvas(imageBuffer, photo, config);
@@ -487,6 +508,30 @@ function readProcStatusMemory(pid = 'self') {
   }
 }
 
+function normalizeIpcBuffer(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value);
+  }
+
+  if (value?.type === 'Buffer' && Array.isArray(value.data)) {
+    return Buffer.from(value.data);
+  }
+
+  if (value?.data instanceof Uint8Array) {
+    return Buffer.from(value.data);
+  }
+
+  return null;
+}
+
 function getDetailedMemorySnapshot() {
   return formatMemoryUsage(process.memoryUsage());
 }
@@ -574,6 +619,13 @@ const nodeHelperObject = {
   visionRequests: new Map(),
   visionWorkerRestarting: false,
   visionWorkerBusy: false,
+  resizeWorker: null,
+  resizeWorkerReady: false,
+  resizeWorkerBusy: false,
+  resizeWorkerRestarting: false,
+  resizeWorkerJobsCompleted: 0,
+  resizeRequestId: 0,
+  resizeRequests: new Map(),
   photosProcessedSinceTelemetry: 0,
   start: function () {
     this.log_info("Starting module helper");
@@ -593,6 +645,13 @@ const nodeHelperObject = {
     this.visionWorkerBusy = false;
     this.visionRequests = new Map();
     this.visionRequestId = 0;
+    this.resizeWorker = null;
+    this.resizeWorkerReady = false;
+    this.resizeWorkerBusy = false;
+    this.resizeWorkerRestarting = false;
+    this.resizeWorkerJobsCompleted = 0;
+    this.resizeRequests = new Map();
+    this.resizeRequestId = 0;
     this.photosProcessedSinceTelemetry = 0;
     
     // Track previous animation type for variety
@@ -1136,6 +1195,344 @@ const nodeHelperObject = {
   },
 
   // ==================== END VISION WORKER MANAGEMENT ====================
+
+  // ==================== RESIZE WORKER PROCESS MANAGEMENT ====================
+
+  initializeResizeWorker: function() {
+    if (this.resizeWorkerRestarting) {
+      console.log("[NodeHelper] Resize worker restart already in progress");
+      return;
+    }
+
+    if (this.resizeWorker && this.isResizeWorkerAlive()) {
+      return;
+    }
+
+    console.log("[NodeHelper] Initializing sharp resize worker process...");
+    this.resizeWorkerRestarting = true;
+
+    const workerPath = path.join(__dirname, 'src/resize/resize-worker.js');
+
+    try {
+      this.resizeWorker = spawn('node', [
+        '--max-old-space-size=512',
+        workerPath
+      ], {
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+        serialization: 'advanced'
+      });
+    } catch (error) {
+      this.resizeWorkerRestarting = false;
+      this.resizeWorkerReady = false;
+      console.error(`[NodeHelper] Failed to spawn resize worker: ${error.message}`);
+      return;
+    }
+
+    const spawnedWorker = this.resizeWorker;
+
+    this.resizeWorker.stdout.on('data', (data) => {
+      for (const line of data.toString().trim().split('\n')) {
+        if (line.trim()) {
+          console.log(`[Resize Worker] ${line}`);
+        }
+      }
+    });
+
+    this.resizeWorker.stderr.on('data', (data) => {
+      for (const line of data.toString().trim().split('\n')) {
+        if (line.trim()) {
+          console.error(`[Resize Worker] [STDERR] ${line}`);
+        }
+      }
+    });
+
+    this.resizeWorker.on('message', (message) => {
+      this.handleResizeWorkerMessage(message);
+    });
+
+    this.resizeWorker.on('exit', (code, signal) => {
+      console.error(`[NodeHelper] Resize worker exited: code=${code}, signal=${signal}`);
+      const isCurrentWorker = this.resizeWorker === spawnedWorker;
+
+      if (isCurrentWorker) {
+        this.resizeWorkerReady = false;
+        this.resizeWorkerBusy = false;
+        this.resizeWorker = null;
+        this.rejectAllResizeRequests(new Error(`Resize worker exited: code=${code}, signal=${signal}`));
+      }
+
+      if (code !== 0 && !this.shuttingDown && !this.resizeWorkerRestarting && isCurrentWorker) {
+        console.log("[NodeHelper] Restarting resize worker in 1 second...");
+        setTimeout(() => {
+          this.initializeResizeWorker();
+        }, 1000);
+      }
+    });
+
+    this.resizeWorker.on('error', (error) => {
+      console.error("[NodeHelper] Resize worker process error:", error.message);
+      this.resizeWorkerReady = false;
+      this.resizeWorkerBusy = false;
+      this.rejectAllResizeRequests(error);
+    });
+
+    console.log(`[NodeHelper] Resize worker process spawned with PID: ${this.resizeWorker.pid}`);
+    this.resizeWorkerRestarting = false;
+  },
+
+  handleResizeWorkerMessage: function(message) {
+    switch (message.type) {
+      case 'RESIZE_WORKER_READY':
+        console.log("[NodeHelper] ✅ Resize worker ready");
+        this.resizeWorkerReady = true;
+        break;
+      case 'RESIZE_RESULT':
+      case 'RESIZE_ERROR':
+        this.handleResizeWorkerResponse(message);
+        break;
+      default:
+        console.warn(`[NodeHelper] Unknown resize worker message type: ${message.type}`);
+    }
+  },
+
+  handleResizeWorkerResponse: function(message) {
+    const { requestId } = message;
+
+    if (!this.resizeRequests.has(requestId)) {
+      console.warn(`[NodeHelper] Received resize response for unknown request ID: ${requestId}`);
+      return;
+    }
+
+    const { resolve, reject, timeout } = this.resizeRequests.get(requestId);
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    this.resizeRequests.delete(requestId);
+    this.resizeWorkerBusy = false;
+
+    if (message.type === 'RESIZE_ERROR') {
+      const error = new Error(message.error || 'Resize worker failed');
+      error.stack = message.stack;
+      reject(error);
+      return;
+    }
+
+    resolve(message);
+  },
+
+  rejectAllResizeRequests: function(error) {
+    for (const [requestId, request] of this.resizeRequests.entries()) {
+      if (request.timeout) {
+        clearTimeout(request.timeout);
+      }
+      request.reject(error);
+      this.resizeRequests.delete(requestId);
+    }
+  },
+
+  isResizeWorkerAlive: function() {
+    if (!this.resizeWorker || !this.resizeWorker.pid) {
+      return false;
+    }
+
+    try {
+      process.kill(this.resizeWorker.pid, 0);
+      return true;
+    } catch (error) {
+      if (error.code === 'ESRCH') {
+        console.warn(`[NodeHelper] Resize worker PID ${this.resizeWorker.pid} no longer exists`);
+        this.resizeWorkerReady = false;
+        return false;
+      }
+      return true;
+    }
+  },
+
+  sendResizeWorkerMessage: function(message, timeoutMs = DEFAULT_RESIZE_WORKER_TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+      if (!this.resizeWorker || !this.resizeWorkerReady || !this.isResizeWorkerAlive()) {
+        reject(new Error('Resize worker not available'));
+        return;
+      }
+
+      if (this.resizeWorkerBusy) {
+        reject(new Error('Resize worker busy'));
+        return;
+      }
+
+      const requestId = ++this.resizeRequestId;
+      message.requestId = requestId;
+      this.resizeWorkerBusy = true;
+
+      const timeout = setTimeout(() => {
+        this.resizeRequests.delete(requestId);
+        this.resizeWorkerBusy = false;
+        const error = new Error(`Resize worker timeout after ${timeoutMs}ms`);
+        error.requestId = requestId;
+        reject(error);
+        this.restartResizeWorker(`request_timeout:${requestId}`);
+      }, timeoutMs);
+
+      this.resizeRequests.set(requestId, {
+        resolve,
+        reject,
+        timeout
+      });
+
+      try {
+        this.resizeWorker.send(message);
+      } catch (error) {
+        clearTimeout(timeout);
+        this.resizeRequests.delete(requestId);
+        this.resizeWorkerBusy = false;
+        reject(error);
+      }
+    });
+  },
+
+  waitForResizeWorkerReady: function(timeoutMs = 2000) {
+    return new Promise((resolve, reject) => {
+      if (this.resizeWorkerReady && this.isResizeWorkerAlive()) {
+        resolve();
+        return;
+      }
+
+      const startedAt = Date.now();
+      const interval = setInterval(() => {
+        if (this.resizeWorkerReady && this.isResizeWorkerAlive()) {
+          clearInterval(interval);
+          resolve();
+          return;
+        }
+
+        if (Date.now() - startedAt >= timeoutMs) {
+          clearInterval(interval);
+          reject(new Error(`Resize worker did not become ready after ${timeoutMs}ms`));
+        }
+      }, 50);
+    });
+  },
+
+  restartResizeWorker: function(reason) {
+    if (this.shuttingDown || this.resizeWorkerRestarting) {
+      return;
+    }
+
+    console.warn(`[NodeHelper] Restarting resize worker: ${reason}`);
+    this.resizeWorkerReady = false;
+    this.resizeWorkerBusy = false;
+    this.resizeWorkerRestarting = true;
+    this.rejectAllResizeRequests(new Error(`Resize worker restarting: ${reason}`));
+
+    const worker = this.resizeWorker;
+    this.resizeWorker = null;
+
+    if (worker && !worker.killed) {
+      try {
+        worker.kill('SIGTERM');
+      } catch (error) {
+        console.warn(`[NodeHelper] Could not terminate resize worker: ${error.message}`);
+      }
+    }
+
+    setTimeout(() => {
+      this.resizeWorkerRestarting = false;
+      this.resizeWorkerJobsCompleted = 0;
+      this.initializeResizeWorker();
+    }, 1000);
+  },
+
+  shutdownResizeWorker: function() {
+    if (!this.resizeWorker) {
+      return;
+    }
+
+    console.log("[NodeHelper] Shutting down resize worker...");
+    this.resizeWorkerReady = false;
+    this.resizeWorkerBusy = false;
+    this.rejectAllResizeRequests(new Error('Resize worker shutting down'));
+
+    try {
+      this.resizeWorker.send({ type: 'SHUTDOWN' });
+    } catch (error) {
+      console.warn("[NodeHelper] Could not send shutdown message to resize worker:", error.message);
+    }
+
+    setTimeout(() => {
+      if (this.resizeWorker && !this.resizeWorker.killed) {
+        console.log("[NodeHelper] Force killing resize worker...");
+        this.resizeWorker.kill('SIGTERM');
+      }
+    }, 5000);
+  },
+
+  recycleResizeWorkerIfNeeded: function(resizeConfig, telemetry = {}) {
+    const workerPid = this.resizeWorker?.pid;
+    const workerMemory = workerPid ? readProcStatusMemory(workerPid) : {};
+    const rssMB = workerMemory.procVmRssMB || telemetry.memory?.rssMB || null;
+
+    if (this.resizeWorkerJobsCompleted >= resizeConfig.workerMaxJobs) {
+      this.restartResizeWorker(`max_jobs:${this.resizeWorkerJobsCompleted}`);
+      return;
+    }
+
+    if (Number.isFinite(rssMB) && rssMB >= resizeConfig.workerMaxRssMB) {
+      this.restartResizeWorker(`max_rss:${rssMB}MB`);
+    }
+  },
+
+  resizeImageWithSharpWorker: async function(imageBuffer, photo, config) {
+    const resizeConfig = getResizeConfig(config);
+
+    if (!this.resizeWorker || !this.isResizeWorkerAlive()) {
+      this.initializeResizeWorker();
+    }
+
+    if (!this.resizeWorkerReady) {
+      await this.waitForResizeWorkerReady(Math.min(2000, resizeConfig.workerTimeoutMs));
+    }
+
+    const response = await this.sendResizeWorkerMessage({
+      type: 'RESIZE_IMAGE',
+      imageBuffer,
+      photo: {
+        id: photo.id,
+        filename: photo.filename,
+        mimeType: photo.mimeType,
+        mediaMetadata: photo.mediaMetadata
+      },
+      config: {
+        showWidth: config.showWidth,
+        showHeight: config.showHeight,
+        imageResize: {
+          sharpCache: resizeConfig.sharpCache,
+          sharpConcurrency: resizeConfig.sharpConcurrency
+        }
+      }
+    }, resizeConfig.workerTimeoutMs);
+
+    const resizedBuffer = normalizeIpcBuffer(response.buffer);
+    if (!resizedBuffer) {
+      throw new Error('Resize worker returned no image buffer');
+    }
+
+    if (photo.mediaMetadata && response.outputWidth && response.outputHeight) {
+      photo.mediaMetadata.width = response.outputWidth;
+      photo.mediaMetadata.height = response.outputHeight;
+    }
+
+    this.resizeWorkerJobsCompleted++;
+    this.recycleResizeWorkerIfNeeded(resizeConfig, response.telemetry);
+
+    return {
+      buffer: resizedBuffer,
+      telemetry: response.telemetry || {},
+      outputWidth: response.outputWidth || null,
+      outputHeight: response.outputHeight || null
+    };
+  },
+
+  // ==================== END RESIZE WORKER MANAGEMENT ====================
 
   // ==================== ANIMATION RULE HELPER FUNCTIONS ====================
   
@@ -1874,6 +2271,9 @@ const nodeHelperObject = {
     if (this.config.kenBurnsEffect) {
       this.initializeVisionWorker();
     }
+    if (getResizeConfig(this.config).backend === 'sharpWorker') {
+      this.initializeResizeWorker();
+    }
     oneDrivePhotosInstance = new OneDrivePhotos({
       debug: this.debug,
       config: config,
@@ -2397,6 +2797,8 @@ const nodeHelperObject = {
     let mimeTypeToSend = photo.mimeType === "image/heic" ? "image/jpeg" : photo.mimeType;
     let oneDriveThumbnailSucceeded = false;
     let oneDriveThumbnailFailed = false;
+    let displayMode = 'normal';
+    let skipVisionForStaticFallback = false;
     try {
       const resizeConfig = getResizeConfig(this.config);
       const thumbnailSize = getOneDriveThumbnailSize(this.config);
@@ -2504,10 +2906,14 @@ const nodeHelperObject = {
             inputBytes: beforeResizeBytes,
             resizeBackend: resizeConfig.backend
           });
-          const resizedBuffer = await resizeImageCarefully(buffer, photo, localResizeConfig);
+          const resizeResult = resizeConfig.backend === 'sharpWorker'
+            ? await this.resizeImageWithSharpWorker(buffer, photo, localResizeConfig)
+            : { buffer: await resizeImageCarefully(buffer, photo, localResizeConfig) };
+          const resizedBuffer = resizeResult.buffer;
           writeCrashBreadcrumb('resize_done', photo, {
             outputBytes: resizedBuffer?.length || 0,
-            resizeBackend: resizeConfig.backend
+            resizeBackend: resizeConfig.backend,
+            workerPid: resizeResult.telemetry?.pid || null
           });
           buffer = resizedBuffer;
           console.log(`[NodeHelper] ✅ Image resized to ${buffer.length} bytes`);
@@ -2517,13 +2923,25 @@ const nodeHelperObject = {
             afterResizeBytes: buffer.length,
             outputWidth: photo.mediaMetadata?.width || null,
             outputHeight: photo.mediaMetadata?.height || null,
-            resizeBackend: resizeConfig.backend
+            resizeBackend: resizeConfig.backend,
+            resizeWorker: resizeResult.telemetry || null
           });
         } catch (resizeError) {
           console.warn(`[NodeHelper] ⚠️ Failed to resize image, using original:`, resizeError.message);
+          if (resizeConfig.backend === 'sharpWorker') {
+            displayMode = 'originalStatic';
+            skipVisionForStaticFallback = true;
+            console.warn(`[NodeHelper] ⚠️ Sharp worker fallback for ${photo.filename}: original-size static image, vision skipped`);
+            writeCrashBreadcrumb('resize_worker_fallback_original_static', photo, {
+              errorMessage: resizeError.message,
+              bufferBytes: buffer?.length || 0
+            });
+          }
           pipelineTelemetry.mark('resize_failed', {
             errorMessage: resizeError.message,
-            bufferBytes: buffer?.length || 0
+            bufferBytes: buffer?.length || 0,
+            resizeBackend: resizeConfig.backend,
+            displayMode
           });
           // Continue with original buffer if resize fails
         }
@@ -2554,7 +2972,7 @@ const nodeHelperObject = {
 
       // Find interesting rectangle for Ken Burns effect (handles faces, interest detection, fallbacks)
       let interestingRectangleResult = null;
-      if (this.config.kenBurnsEffect !== false && photo.filename) {
+      if (this.config.kenBurnsEffect !== false && photo.filename && !skipVisionForStaticFallback) {
         logMemoryUsage(`before vision processing ${photo.filename}`);
         writeCrashBreadcrumb('vision_start', photo, { inputBytes: buffer?.length || 0 });
         interestingRectangleResult = await this.findInterestingRectangle(buffer, photo.filename);
@@ -2581,7 +2999,8 @@ const nodeHelperObject = {
       } else {
         pipelineTelemetry.mark('vision_skipped', {
           kenBurnsEffect: this.config.kenBurnsEffect,
-          hasFilename: !!photo.filename
+          hasFilename: !!photo.filename,
+          skipVisionForStaticFallback
         });
       }
 
@@ -2603,11 +3022,13 @@ const nodeHelperObject = {
         album: source, 
         info: null, 
         errorMessage: null,
+        displayMode,
         interestingRectangleResult // Include face detection results
       });
       pipelineTelemetry.mark('sent_to_frontend', {
         photoBufferBytes: buffer?.length || 0,
-        mimeTypeSent: mimeTypeToSend
+        mimeTypeSent: mimeTypeToSend,
+        displayMode
       });
 
       // EXPLICITLY NULL LARGE OBJECTS
@@ -2647,6 +3068,7 @@ const nodeHelperObject = {
     
     // Shutdown vision worker process
     this.shutdownVisionWorker();
+    this.shutdownResizeWorker();
   },
 
   savePhotoListCache: function () {

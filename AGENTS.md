@@ -23,6 +23,13 @@ Commit `4699ebe` added the first stabilization pass:
 
 The expected behavior is that photos continue to rotate even if `vision-worker` dies, hangs, or restarts. Fallback photos should display without Ken Burns pan/zoom.
 
+Branch `resize-worker-isolation` is testing a local resize isolation path:
+
+- `imageResize.backend: "sharpWorker"` fetches the original image in the node helper, resizes it in `src/resize/resize-worker.js`, then sends the resized JPEG to the frontend.
+- The resize worker is separate from both MagicMirror/Electron and the OpenCV vision worker. It is bounded by `workerTimeoutMs`, recycled after `workerMaxJobs`, and recycled if worker RSS crosses `workerMaxRssMB`.
+- If the resize worker is unavailable or fails, the backend keeps the original-size image, sends `displayMode: "originalStatic"`, skips vision for that photo, and the frontend displays it without Ken Burns/backdrop animation. Photo rotation must continue.
+- Keep `FOREGROUND_DISPLAY_FLOW.md` updated when changing frontend/backend event flow.
+
 ## Dev and Test Loop
 
 There are multiple checkouts:
