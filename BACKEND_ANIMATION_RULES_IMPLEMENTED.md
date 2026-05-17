@@ -1,5 +1,7 @@
 # Backend Animation Rules Implementation - COMPLETED
 
+Current state as of 2026-05-17: this rule system is active. Backend vision analysis chooses the animation type/reason, and the frontend only applies the requested animation. If `displayMode: "originalStatic"` is sent because resize worker fallback was used, the frontend suppresses these animations for that photo.
+
 ## ✅ What Was Implemented
 
 ### 🎯 **Proper Separation of Concerns**
@@ -81,9 +83,9 @@ visionResults = {
 - Frontend logs show animation application: `"🎬 Using backend animation decision: zoom_out (large_face)"`
 - Image dimensions and vision analysis results are logged for troubleshooting
 
-## 🧪 **Ready for Testing**
+## Historical Testing Note
 
-The implementation is complete and ready for testing. All code has been:
+At the time this was written, the implementation was complete and ready for testing. The system is now part of the normal pipeline. At implementation time, all code had been:
 - ✅ Syntax validated  
 - ✅ TypeScript compiled to JavaScript
 - ✅ Architecture follows proper separation of concerns

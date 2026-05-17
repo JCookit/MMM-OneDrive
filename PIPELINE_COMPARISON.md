@@ -1,5 +1,12 @@
 # Face Detection Pipeline Comparison
 
+Historical note: this comparison was created while moving OpenCV/vision work into `src/vision/vision-worker.js`. The IPC buffer path has since been validated in production-style Pi runs. The current architecture also has a separate `src/resize/resize-worker.js` for Sharp resizing, so there are now two isolated worker processes:
+
+- `src/resize/resize-worker.js`: Sharp resize only, recycled by job count/RSS.
+- `src/vision/vision-worker.js`: OpenCV/YOLO/interest analysis only.
+
+Use this file as background for vision-worker debugging, not as a list of current open action items.
+
 ## Original System Flow (BEFORE Refactor)
 ```
 Photo Processing → buffer (unchanged)
@@ -132,8 +139,6 @@ However, this reconstruction might introduce subtle differences in:
 3. **Test OpenCV Decoding**: Compare cv.imdecode results
 4. **Test YOLO Input**: Compare blob creation from both image sources
 
-## Next Steps
+## Historical Next Steps
 
-1. Create test that compares buffer integrity across IPC boundary
-2. Test YOLO with direct buffer vs reconstructed buffer
-3. If buffer corruption confirmed, implement alternative IPC mechanism (shared memory/file)
+These were the original next steps. The current production path uses Node IPC buffers for both resize and vision workers. Shared memory/temp-file transfer is still a possible future optimization, but it is not currently required.

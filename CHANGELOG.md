@@ -1,5 +1,13 @@
 # MMM-OneDrive Change Log
 
+**`[Unreleased] - 2026/05/17`**
+- Added `imageResize.backend: "sharpWorker"` to isolate Sharp resizing in `src/resize/resize-worker.js`.
+- Added resize worker lifecycle management, IPC timeout handling, job-count/RSS recycling, and shutdown cleanup.
+- Added `displayMode: "originalStatic"` fallback so resize worker failure shows the original image statically and does not block slideshow timing.
+- Preserved immediate backend prefetch while making foreground swaps atomic and keeping auth/error overlays separate from photo DOM.
+- Added optional `debugDomTelemetry` and expanded pipeline/frontend telemetry for memory and display-flow troubleshooting.
+- Documented current Pi/WSL development loop and display/resize data flow.
+
 **`[1.6.0] - 2025/07/15`**
 - 🎉 **Major Feature**: Added OneDrive folder support
   - Now supports regular OneDrive folders in addition to albums

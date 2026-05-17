@@ -1,4 +1,12 @@
-# Web Animations API Implementation
+# Web Animations API Investigation Note
+
+This was an investigation path for renderer-side crashes/memory growth. It is not the current active implementation path.
+
+Current state as of 2026-05-17:
+
+- Frontend Ken Burns uses CSS animation paths in `src/frontend/main.ts`.
+- The stability work that was merged to `main` isolates backend Sharp resizing in `src/resize/resize-worker.js`.
+- Keep this note only as background if renderer animation memory becomes suspicious again.
 
 ## Purpose
 Replace CSS-based Ken Burns animations with Web Animations API to potentially resolve Pi memory crashes and SIGSEGV errors.

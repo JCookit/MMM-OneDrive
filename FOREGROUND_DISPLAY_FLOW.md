@@ -2,7 +2,9 @@
 
 ## Current State
 
-As of 2026-05-15, MMM-OneDrive is testing local resize isolation on branch `resize-worker-isolation`. The stable comparison path is still `imageResize.backend: "onedriveThumbnail"`, which avoids local resize work while preserving immediate photo prefetch. The new experimental path is `imageResize.backend: "sharpWorker"`, which fetches the original image but performs Sharp resize in `src/resize/resize-worker.js` instead of the MagicMirror/Electron helper process.
+As of 2026-05-17, local resize isolation has been merged to `main` in PR #2 (`0426d36`). The preferred production path for local resizing is `imageResize.backend: "sharpWorker"`, which fetches the original image but performs Sharp resize in `src/resize/resize-worker.js` instead of the MagicMirror/Electron helper process.
+
+The stable comparison path remains `imageResize.backend: "onedriveThumbnail"`, which avoids local resize work by asking Microsoft Graph for a display-sized thumbnail. Use it as an A/B comparison if local resize behavior regresses.
 
 The module has foreground telemetry enabled:
 
@@ -13,7 +15,7 @@ The module has foreground telemetry enabled:
 
 Verbose DOM mutation telemetry is available with `debugDomTelemetry: true`, but defaults off so thumbnail/memory runs stay readable.
 
-The latest working hypothesis is that the foreground blanking is a frontend state-machine problem, not bad image bytes. Telemetry shows valid image buffers, valid MIME, successful `image_load`, and nonzero natural dimensions.
+The foreground blanking issue was a frontend state-machine problem, not bad image bytes. The fix is now implemented: image swaps are atomic, active blob URLs are revoked only after commit, and auth/error overlays no longer clear foreground photo DOM.
 
 ## Event Flow
 
@@ -21,7 +23,7 @@ Startup:
 
 1. Frontend `start()` sends `INIT`.
 2. Frontend immediately sends `NEXT_PHOTO`.
-3. Backend initializes OneDrive, cache, scan state, and vision worker.
+3. Backend initializes OneDrive, cache, scan state, the vision worker when Ken Burns is enabled, and the resize worker when `imageResize.backend` is `sharpWorker`.
 4. Backend may send `SCAN_COMPLETE`; frontend calls `requestNextPhoto()`, but `processingRequested` should suppress duplicate in-flight requests.
 
 Normal display:
@@ -35,7 +37,7 @@ Normal display:
 
 Resize paths:
 
-- `imageResize.backend: "onedriveThumbnail"` asks Microsoft Graph for a display-sized thumbnail. If Graph fails, existing fallback behavior fetches the full image and uses in-process Sharp.
+- `imageResize.backend: "onedriveThumbnail"` asks Microsoft Graph for a display-sized thumbnail. If Graph fails, existing fallback behavior fetches the full image and uses local resize.
 - `imageResize.backend: "sharp"` fetches the full image and resizes in the node helper process.
 - `imageResize.backend: "canvas"` fetches the full image and resizes in the node helper process with Canvas.
 - `imageResize.backend: "sharpWorker"` fetches the full image in the node helper, sends the buffer over Node IPC to `src/resize/resize-worker.js`, and receives a display-sized JPEG buffer back. The worker is bounded by `workerTimeoutMs`, recycled after `workerMaxJobs`, and recycled if worker RSS crosses `workerMaxRssMB`.
@@ -66,7 +68,7 @@ Device-auth first run:
 5. Frontend removes only `ONEDRIVE_PHOTO_ERROR` and continues requesting/loading photos.
 6. `CLEAR_ERROR` must never clear `ONEDRIVE_PHOTO_CURRENT`, because auth success also occurs during normal token refreshes and thumbnail fetches.
 
-## Known Failure Pattern
+## Historical Failure Pattern
 
 The bad flow was:
 
@@ -78,7 +80,7 @@ The bad flow was:
 
 If the renderer was delayed by backend/socket work or MMM-pages suspend/resume churn, the old visible foreground was already gone and the replacement foreground could remain visually absent during the first paint/fade window. The backdrop could still show because it is a separate background image.
 
-## Intended Fix
+## Intended Fix, Now Implemented
 
 Foreground replacement should be atomic:
 
@@ -91,11 +93,13 @@ Foreground replacement should be atomic:
 
 Immediate backend prefetch is still required and should remain in place.
 
-## Implemented Change
+## Implemented Changes
 
 The frontend now prepares blob URLs in `displayCachedPhoto()` but keeps the previously displayed blob URLs active. `render()` loads the replacement `<img>` off-DOM and commits the swap only after `onload`. Old blob URLs are revoked only after `foreground_swap_committed`. If the replacement image errors or becomes stale, the old displayed photo remains intact and the unused new blob URLs are revoked.
 
 Error display now uses a separate `ONEDRIVE_PHOTO_ERROR` overlay. `ERROR` creates/updates that overlay, and `CLEAR_ERROR` removes only that overlay. This preserves the expected first-run device-auth message while preventing later auth success events from blanking the foreground photo.
+
+Resize isolation now uses `src/resize/resize-worker.js` for `sharpWorker`. The node helper keeps slideshow timing independent from worker health: resize worker failure causes an `originalStatic` photo fallback for that one photo, not a blocked rotation. Vision is skipped for that fallback to avoid passing full-size images to OpenCV.
 
 ## Signals To Watch
 

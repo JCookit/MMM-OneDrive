@@ -1,3 +1,13 @@
+# Original Vision Process Refactor Prompt
+
+Historical note: this file is the original implementation prompt for moving OpenCV/vision work into a child process. It is preserved for context, not as current instructions.
+
+Current state as of 2026-05-17:
+
+- Vision isolation is implemented in `src/vision/vision-worker.js`.
+- Sharp resize isolation is separately implemented in `src/resize/resize-worker.js`.
+- `FOREGROUND_DISPLAY_FLOW.md` and `AGENTS.md` are the current operational references.
+
 ok this is a big one.
 
 let's go ahead and implement the opencv code as its own child process.

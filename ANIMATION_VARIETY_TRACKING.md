@@ -1,5 +1,7 @@
 # Animation Variety Tracking Implementation - COMPLETED
 
+Current state as of 2026-05-17: this variety system is active in the backend animation decision path. It should be considered part of normal behavior unless explicitly disabled or rewritten.
+
 ## ✅ What Was Added
 
 ### 🎯 **Animation Variety System**
@@ -82,9 +84,9 @@
 - **Smooth Transitions**: Variety feels natural and doesn't break the viewing experience
 - **Debugging Clarity**: Logs show exactly how variety influenced each decision
 
-## 🧪 **Ready for Testing**
+## Historical Testing Note
 
-The animation variety system is now implemented and ready for testing. The system will:
+At the time this was written, the animation variety system was newly implemented and ready for testing. It is now part of the normal pipeline. The system will:
 
 1. **Remember** the previous animation type
 2. **Adjust** probabilities to favor alternatives 

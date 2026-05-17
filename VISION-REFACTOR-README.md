@@ -1,5 +1,7 @@
 # Vision Processing Refactor - Complete Process Isolation
 
+Current state as of 2026-05-17: this architecture is active. Vision work runs in `src/vision/vision-worker.js`, and resize work can separately run in `src/resize/resize-worker.js` when `imageResize.backend` is `sharpWorker`. These are intentionally separate child processes with different responsibilities.
+
 ## Overview
 
 This refactor implements complete process separation for all computer vision operations in MMM-OneDrive. The OpenCV/YOLO processing now runs in an isolated child process to prevent crashes from affecting the main MagicMirror application.

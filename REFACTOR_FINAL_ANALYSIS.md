@@ -1,5 +1,7 @@
 # Process Refactor - Complete Status Analysis
 
+Current state as of 2026-05-17: the vision process refactor is active and remains valid background. Since this analysis was written, resize work has also been isolated into `src/resize/resize-worker.js` via `imageResize.backend: "sharpWorker"`. The "not implemented" shared-memory note is still true; current production-style testing has not required shared memory.
+
 ## ✅ FULLY IMPLEMENTED
 
 ### 1. Standalone CV Process ✅ 

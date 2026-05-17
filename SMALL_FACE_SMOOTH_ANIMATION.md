@@ -1,5 +1,7 @@
 # Smooth Small Face Animation Implementation - COMPLETED
 
+Current state as of 2026-05-17: this behavior is active. Small faces should generally use normal `zoom_out` with a padded bounding box instead of `zoom_out_fast`; `zoom_out_fast` remains in the code as a rollback/future option.
+
 ## ✅ What Was Changed
 
 ### 🎯 **Problem Solved**
@@ -100,9 +102,9 @@ const paddingY = 50 * 0.5 = 25;  // 25 pixels each side
 5. **✅ Configurable**: Easy to adjust padding percentage (currently 50%)
 6. **✅ Debug Friendly**: Clear logging shows when padding is applied
 
-## 🧪 **Ready for Testing**
+## Historical Testing Note
 
-The smooth small face animation system is now implemented. When testing:
+The smooth small face animation system is now part of the normal pipeline. When testing or troubleshooting:
 
 **Expected for Small Faces:**
 - Animation type will be `zoom_out` (not `zoom_out_fast`)

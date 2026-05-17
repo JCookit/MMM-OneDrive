@@ -4,6 +4,8 @@
 
 The MMM-OneDrive module now includes **intelligent face detection** to automatically determine optimal focal points for the Ken Burns crop-and-zoom effect. Instead of using random crop positions, the module can detect faces in your photos and center the Ken Burns animation on them for more engaging photo displays.
 
+Current state as of 2026-05-17: face/interest analysis runs in the isolated `src/vision/vision-worker.js` child process. If the vision worker is unavailable, times out, or is skipped because a resize fallback sent `displayMode: "originalStatic"`, photo display must continue without blocking the slideshow.
+
 ## Features
 
 ### 🎯 Intelligent Focal Points
@@ -96,7 +98,7 @@ faceDetection: {
 
 ### Detection Process
 1. **Photo Loading**: When a new photo is loaded, the system checks if face detection is enabled
-2. **Image Analysis**: The photo is analyzed using OpenCV's Haar cascade face detector
+2. **Image Analysis**: The photo is analyzed in the vision worker using YOLO face detection with Haar/interest/center fallbacks
 3. **Focal Point Calculation**: 
    - **Single Face**: Centers on the face with some expansion
    - **Multiple Faces**: Creates bounding box around all faces
@@ -105,10 +107,10 @@ faceDetection: {
 5. **Timing Logging**: Records processing time for performance monitoring
 
 ### Face Detection Algorithm
-- Uses OpenCV's `HAAR_FRONTALFACE_ALT2` cascade classifier
-- Configurable scale factor and minimum neighbors for accuracy vs. speed
+- Uses YOLO face detection as the primary path
+- Uses OpenCV Haar cascade and interest detection as fallbacks
 - Size constraints prevent false positives from small artifacts
-- Smart focal area expansion ensures faces aren't cut off during zoom
+- Smart focal area expansion ensures faces are not cut off during zoom
 
 ### Performance Considerations
 - Face detection runs asynchronously to avoid blocking photo transitions

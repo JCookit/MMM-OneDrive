@@ -136,6 +136,14 @@ Once properly installed, face detection provides:
     },
     showWidth: 1080, // These values will be used for quality of downloaded photos to show. real size to show in your MagicMirror region is recommended.
     showHeight: 1920,
+    imageResize: {
+      backend: "sharpWorker", // "sharpWorker", "sharp", "canvas", or "onedriveThumbnail"
+      sharpCache: false,
+      sharpConcurrency: 1,
+      workerTimeoutMs: 15000,
+      workerMaxJobs: 100,
+      workerMaxRssMB: 750,
+    },
     timeFormat: "YYYY/MM/DD HH:mm", // Or `relative` can be used.
     forceAuthInteractive: false, // Force interactive authorization
   }
@@ -202,6 +210,32 @@ condition: {
 ### `showWidth`, `showHeight`
 
 - Specify your real resolution to show.
+
+### `imageResize`
+
+Controls how full-size OneDrive images are reduced before they are sent to the frontend. Resizing is important on Raspberry Pi because sending original phone/camera images to Electron can make Ken Burns animation expensive.
+
+Recommended local resize backend:
+
+```js
+imageResize: {
+  backend: "sharpWorker",
+  sharpCache: false,
+  sharpConcurrency: 1,
+  workerTimeoutMs: 15000,
+  workerMaxJobs: 100,
+  workerMaxRssMB: 750,
+}
+```
+
+Backends:
+
+- `"sharpWorker"`: preferred local path. Fetches the original image, resizes with Sharp in `src/resize/resize-worker.js`, and recycles the worker to bound native memory.
+- `"onedriveThumbnail"`: asks Microsoft Graph for a display-sized thumbnail. Useful as an A/B comparison because it avoids local resize work.
+- `"sharp"`: legacy in-process Sharp resize in the MagicMirror/Electron helper. This has shown memory growth on the Pi.
+- `"canvas"`: legacy in-process Canvas resize. Kept as a rollback path, but canvas 3.x was part of the instability investigation.
+
+If the `sharpWorker` process fails, the module keeps photo rotation going by sending the original image with `displayMode: "originalStatic"`. The frontend shows it statically and skips Ken Burns/backdrop animation for that photo.
 
 ### `timeFormat`
 

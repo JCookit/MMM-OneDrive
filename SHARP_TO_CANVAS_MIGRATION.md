@@ -1,4 +1,13 @@
-# Sharp to Canvas Migration - COMPLETED
+# Sharp to Canvas Migration - Historical Note
+
+This document describes an earlier mitigation that replaced one Sharp metadata/dimension path with Canvas plus EXIF handling. It is not the current recommended resize strategy.
+
+Current state as of 2026-05-17:
+
+- Preferred local resize backend is `imageResize.backend: "sharpWorker"`.
+- Sharp resizing still exists, but it runs in `src/resize/resize-worker.js`, outside the MagicMirror/Electron helper process.
+- In-process `"sharp"` and `"canvas"` resize backends remain as rollback/A-B test paths.
+- The Pi stability fix came from process isolation and worker recycling, not from declaring Sharp or Canvas globally safe/unsafe.
 
 ## ✅ Problem Solved
 

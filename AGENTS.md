@@ -6,9 +6,9 @@ MMM-OneDrive is a heavily customized MagicMirror module used for OneDrive photo 
 
 The production runtime is a Raspberry Pi 5 running Raspberry Pi OS Bookworm. MagicMirror is managed by PM2 as `MagicMirror`. The module depends on a custom OpenCV build with DNN support plus `@u4/opencv4nodejs`; native module compatibility matters after MagicMirror/Electron updates.
 
-## Current Investigation
+## Current State
 
-After updating MagicMirror to 2.36.0 / Electron 41 and moving to `canvas` 3.x, the Pi started hard-freezing after hours. Persistent journal logs showed repeated global OOM events where the kernel killed the main Electron process. This proves Electron was the OOM victim, not necessarily the root leak. Possible sources include renderer image/blob lifecycle, MagicMirror/Electron behavior, native canvas/sharp allocations, or OpenCV worker/native memory.
+After updating MagicMirror to 2.36.0 / Electron 41 and moving to `canvas` 3.x, the Pi started hard-freezing after hours. Persistent journal logs showed repeated global OOM events where the kernel killed the main Electron process. Follow-up A/B testing narrowed the practical mitigation to isolating native image resize work outside the MagicMirror/Electron process.
 
 Commit `4699ebe` added the first stabilization pass:
 
@@ -23,11 +23,12 @@ Commit `4699ebe` added the first stabilization pass:
 
 The expected behavior is that photos continue to rotate even if `vision-worker` dies, hangs, or restarts. Fallback photos should display without Ken Burns pan/zoom.
 
-Branch `resize-worker-isolation` is testing a local resize isolation path:
+PR #2 merged the local resize isolation path into `main` as commit `0426d36`:
 
 - `imageResize.backend: "sharpWorker"` fetches the original image in the node helper, resizes it in `src/resize/resize-worker.js`, then sends the resized JPEG to the frontend.
 - The resize worker is separate from both MagicMirror/Electron and the OpenCV vision worker. It is bounded by `workerTimeoutMs`, recycled after `workerMaxJobs`, and recycled if worker RSS crosses `workerMaxRssMB`.
 - If the resize worker is unavailable or fails, the backend keeps the original-size image, sends `displayMode: "originalStatic"`, skips vision for that photo, and the frontend displays it without Ken Burns/backdrop animation. Photo rotation must continue.
+- Pi validation before merge: about 40 hours uptime, no OOM/watchdog crash, resize worker recycling every 100 jobs, frontend image errors at 0.
 - Keep `FOREGROUND_DISPLAY_FLOW.md` updated when changing frontend/backend event flow.
 
 ## Dev and Test Loop
@@ -78,6 +79,15 @@ ps -eo pid,ppid,ni,stat,%cpu,%mem,rss,cmd --sort=-rss | head -30
 pm2 logs MagicMirror --lines 200 --nostream
 journalctl -k -b 0 --no-pager | grep -iE 'oom|out of memory|killed process|segfault|electron|node'
 ```
+
+Current healthy Pi signals:
+
+- PM2 `MagicMirror` process remains online without restart loops.
+- `ps` shows one `src/resize/resize-worker.js` child and one `src/vision/vision-worker.js` child under the Electron/MagicMirror process tree.
+- `PIPELINE_TELEMETRY.configuredSize.resizeBackend` is `sharpWorker`.
+- `PIPELINE_TELEMETRY` resize stage includes `resizeWorker.pid` and worker memory.
+- Frontend telemetry has matching `imageLoad` count and `imageError: 0`.
+- Repeated `Restarting resize worker: max_jobs:100` followed by `Resize worker exited: code=null, signal=SIGTERM` is expected recycle noise, not a crash by itself.
 
 ## Working Rules
 
