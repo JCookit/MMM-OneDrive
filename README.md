@@ -145,7 +145,8 @@ Once properly installed, face detection provides:
       workerMaxRssMB: 750,
     },
     timeFormat: "YYYY/MM/DD HH:mm", // Or `relative` can be used.
-    forceAuthInteractive: false, // Force interactive authorization
+    forceAuthInteractive: false, // Force browser-based authorization instead of device-code authorization
+    allowInteractiveBrowserAuth: false, // Kiosk safety: prevent auth fallback from opening Chromium unless explicitly enabled
   }
 },
 ```

@@ -29,6 +29,7 @@ export type Config = {
   resizeBackend?: "sharp" | "sharpWorker" | "canvas" | "onedriveThumbnail";
   timeFormat: string;
   forceAuthInteractive: boolean;
+  allowInteractiveBrowserAuth?: boolean;
   autoInfoPosition: AutoInfoPositionFunction;
   leftMargin?: string | null; // e.g. "25vw" or "400px" - leaves space for left sidebar modules
   kenBurnsEffect?: boolean; // Enable/disable Ken Burns crop-and-zoom effect

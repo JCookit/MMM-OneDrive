@@ -104,7 +104,13 @@ class OneDrivePhotos extends EventEmitter {
           correlationId: crypto.randomUUID(),
         };
         try {
-          const tokenResponse = await authProvider.getToken(tokenRequest, this.config.forceAuthInteractive, (r) => this.deviceCodeCallback(r), (message) => this.emit("errorMessage", message));
+          const tokenResponse = await authProvider.getToken(
+            tokenRequest,
+            this.config.forceAuthInteractive,
+            this.config.allowInteractiveBrowserAuth,
+            (r) => this.deviceCodeCallback(r),
+            (message) => this.emit("errorMessage", message)
+          );
           // this.log("onAuthReady token responded");
           this.emit("authSuccess");
           this.#graphClient = Client.init({

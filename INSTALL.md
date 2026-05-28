@@ -58,7 +58,7 @@
 ### Sperated machine (legacy way)
 
    1. Install a copy in your local machine (Win / Mac)
-   1. Update MagicMirror config file `config/config.js` and turn on the flag `forceAuthInteractive: true`
+   1. Update MagicMirror config file `config/config.js` and turn on the flags `forceAuthInteractive: true` and `allowInteractiveBrowserAuth: true`
    1. Start MagicMirror as usual
 
       ```sh
@@ -66,7 +66,7 @@
       npm start
       ```
 
-   1. At the first time execution, it will be opened a browser and will ask you to login Microsoft account.
+   1. At the first time execution, it will open a browser and ask you to login Microsoft account.
    1. Authorize it and close the browser when done
       <br />
       <img src="images/authorize.png" width="300">

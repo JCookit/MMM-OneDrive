@@ -68,6 +68,12 @@ Device-auth first run:
 5. Frontend removes only `ONEDRIVE_PHOTO_ERROR` and continues requesting/loading photos.
 6. `CLEAR_ERROR` must never clear `ONEDRIVE_PHOTO_CURRENT`, because auth success also occurs during normal token refreshes and thumbnail fetches.
 
+Kiosk auth guard:
+
+- `allowInteractiveBrowserAuth` defaults to `false`.
+- If silent auth fails and device-code auth fails or times out, the backend must surface/log the auth error and retry later; it must not launch browser auth.
+- Browser-based auth through Electron `shell.openExternal` is allowed only when `allowInteractiveBrowserAuth: true` is explicitly configured.
+
 ## Historical Failure Pattern
 
 The bad flow was:

@@ -65,10 +65,11 @@ class AuthProvider {
   /**
    * @param {TokenRequestCommon} tokenRequest
    * @param {boolean} forceAuthInteractive
+   * @param {boolean} allowInteractiveBrowserAuth
    * @param {(response: import("@azure/msal-common").DeviceCodeResponse) => void} deviceCodeCallback 
    * @param {(message: string) => void} waitInteractiveCallback
    */
-  async getToken(tokenRequest, forceAuthInteractive, deviceCodeCallback = null, waitInteractiveCallback = null) {
+  async getToken(tokenRequest, forceAuthInteractive, allowInteractiveBrowserAuth = false, deviceCodeCallback = null, waitInteractiveCallback = null) {
     /**
      * @type {import("@azure/msal-node").AuthenticationResult}
      */
@@ -81,12 +82,22 @@ class AuthProvider {
     }
     if (!authResponse) {
       if (forceAuthInteractive) {
+        if (!allowInteractiveBrowserAuth) {
+          const error = new Error("Interactive browser authorization is disabled. Set allowInteractiveBrowserAuth: true to permit browser-based sign-in.");
+          this.logError("Interactive browser authorization requested but blocked by configuration.");
+          throw error;
+        }
         waitInteractiveCallback("Please switch to browser window and continue the authorization process.");
         authResponse = await this.getTokenInteractive(tokenRequest);
       } else {
         try {
           authResponse = await this.getTokenDeviceCode(tokenRequest, deviceCodeCallback);
-        } catch {
+        } catch (error) {
+          this.logError("Device code authorization failed", error);
+          if (!allowInteractiveBrowserAuth) {
+            this.logError("Interactive browser authorization fallback blocked by configuration.");
+            throw error;
+          }
           waitInteractiveCallback("Please switch to browser window and continue the authorization process.");
           authResponse = await this.getTokenInteractive(tokenRequest);
         }
@@ -111,10 +122,10 @@ class AuthProvider {
     } catch (error) {
       this.logError(error);
       if (error instanceof InteractionRequiredAuthError) {
-        this.logError("Silent token acquisition failed, acquiring token interactive");
+        this.logError("Silent token acquisition failed; additional authorization is required.");
       }
       if (error instanceof ServerError && error.errorCode === "invalid_grant") {
-        this.logError("Silent token acquisition failed, acquiring token interactive");
+        this.logError("Silent token acquisition failed with invalid_grant; additional authorization is required.");
       }
       return undefined;
     }

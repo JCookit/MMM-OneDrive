@@ -45,6 +45,7 @@ Module.register<Config>("MMM-OneDrive", {
     timeFormat: "YYYY/MM/DD HH:mm",
     autoInfoPosition: false,
     forceAuthInteractive: false,
+    allowInteractiveBrowserAuth: false,
     leftMargin: null, // e.g. "25vw" or "400px" - leaves space for left sidebar modules
     kenBurnsEffect: true, // Enable Ken Burns crop-and-zoom effect by default
     kenBurnsCenterStart: true, // NEW: Start with focal point centered, then pan to natural position
