@@ -89,6 +89,8 @@ Module.register<Config>("MMM-OneDrive", {
     // Initialize photo caching system
     this.photoCache = null; // Will store: { photo, photoBuffer, mimeType, album, interestingRectangleResult }
     this.displayTimer = null;
+    this.noPhotoRetryTimer = null;
+    this.noPhotoRetryCount = 0;
     this.processingRequested = false;
     this.renderGeneration = 0;
     this.currentBlobUrl = null; // For blob URL cleanup
@@ -257,8 +259,8 @@ Module.register<Config>("MMM-OneDrive", {
       info.innerHTML = String(payload);
     }
     if (noti === "NO_PHOTO") {
-      // the next UX trigger (or scan complete) will cause a photo process (and hopefully refresh)
-      this.processingRequested = false
+      this.processingRequested = false;
+      this.scheduleNoPhotoRetry("NO_PHOTO");
     }
     if (noti === "RENDER_PHOTO") {
       console.log("[MMM-OneDrive] 💾 Photo received from backend, caching:", payload.photo.filename);
@@ -266,6 +268,8 @@ Module.register<Config>("MMM-OneDrive", {
       // Cache the photo data
       this.photoCache = payload;
       this.processingRequested = false;
+      this.clearNoPhotoRetry("RENDER_PHOTO");
+      this.noPhotoRetryCount = 0;
       
       // If this is the very first photo, display it immediately and start timer
       if (!this.displayTimer) {
@@ -284,12 +288,53 @@ Module.register<Config>("MMM-OneDrive", {
   },
 
   // ==================== NEW CACHING SYSTEM ==================== 
+  clearNoPhotoRetry: function(reason: string) {
+    if (this.noPhotoRetryTimer) {
+      clearTimeout(this.noPhotoRetryTimer);
+      this.noPhotoRetryTimer = null;
+      console.log(`[MMM-OneDrive] Cleared no-photo retry timer (${reason})`);
+    }
+  },
+
+  scheduleNoPhotoRetry: function(reason: string) {
+    if (this.suspended) {
+      console.log(`[MMM-OneDrive] No-photo retry deferred while suspended (${reason})`);
+      return;
+    }
+
+    if (this.displayTimer) {
+      console.log(`[MMM-OneDrive] No-photo retry skipped; display timer is active (${reason})`);
+      return;
+    }
+
+    if (this.noPhotoRetryTimer) {
+      console.log(`[MMM-OneDrive] No-photo retry already scheduled (${reason})`);
+      return;
+    }
+
+    const retryDelayMs = Math.min(
+      60000,
+      Math.max(10000, 10000 * Math.pow(2, Math.min(this.noPhotoRetryCount, 2)))
+    );
+    this.noPhotoRetryCount++;
+    console.warn(`[MMM-OneDrive] No photo available; retrying in ${Math.round(retryDelayMs / 1000)}s (${reason})`);
+    this.noPhotoRetryTimer = setTimeout(() => {
+      this.noPhotoRetryTimer = null;
+      if (this.suspended) {
+        console.log("[MMM-OneDrive] No-photo retry skipped because module is suspended");
+        return;
+      }
+      this.requestNextPhoto();
+    }, retryDelayMs);
+  },
+
   requestNextPhoto: function() {
     if (this.processingRequested) {
       console.log("[MMM-OneDrive] Photo processing already in progress, skipping request");
       return;
     }
     
+    this.clearNoPhotoRetry("requestNextPhoto");
     this.processingRequested = true;
     console.log("[MMM-OneDrive] ➤ Requesting next photo from backend");
     this.sendSocketNotification("NEXT_PHOTO", []);
@@ -1371,6 +1416,7 @@ createStaticBackdropKeyframes: function(): void {
       clearTimeout(this.displayTimer);
       this.displayTimer = null;
     }
+    this.clearNoPhotoRetry("suspend");
 
     this.sendSocketNotification("MODULE_SUSPENDED", undefined);
     this.suspended = true;
@@ -1383,6 +1429,8 @@ createStaticBackdropKeyframes: function(): void {
     // Restart the display cycle if we have cached photos
     if (this.photoCache && !this.displayTimer) {
       this.scheduleNextDisplay();
+    } else if (!this.photoCache && !this.processingRequested) {
+      this.requestNextPhoto();
     }
   },
 });

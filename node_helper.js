@@ -2497,7 +2497,11 @@ const nodeHelperObject = {
     console.log(`[NodeHelper] 📸 Processing photo ${this.uiPhotoIndex + 1}/${this.localPhotoList.length}: ${photo.filename}`);
 
     try {
-      await this.prepareShowPhoto({ photoId: photo.id });
+      const photoSent = await this.prepareShowPhoto({ photoId: photo.id });
+      if (!photoSent) {
+        console.warn(`[NodeHelper] ⚠ Photo was not sent to frontend, will retry current index on next request: ${photo.filename}`);
+        return;
+      }
 
       console.log("[NodeHelper] ✅ Photo processed successfully");
     
@@ -2744,7 +2748,8 @@ const nodeHelperObject = {
     const photo = this.localPhotoList.find((p) => p.id === photoId);
     if (!photo) {
       this.log_error(`Photo with id ${photoId} not found in local list`);
-      return;
+      this.sendSocketNotification("NO_PHOTO");
+      return false;
     }
     this.log_info("Loading to UI:", { id: photoId, filename: photo.filename });
     const pipelineTelemetry = createPhotoPipelineTelemetry(photo, this.config);
@@ -3039,6 +3044,7 @@ const nodeHelperObject = {
       
       logMemoryUsage(`prepareShowPhoto complete for ${photo.filename}`);
       pipelineTelemetry.flush('ok');
+      return true;
       
     } catch (err) {
       pipelineTelemetry.mark('error', {
@@ -3049,14 +3055,14 @@ const nodeHelperObject = {
       this.sendSocketNotification("NO_PHOTO");  // prime the pump for the UX asking again
       if (err instanceof FetchHTTPError) {
         // silently skip the error
-        return;
+        return false;
       }
       this.log_error("Image loading fails:", photo.id, photo.filename, photo.baseUrl);
       if (err) {
         this.log_error("error", err?.message, err?.name);
         this.log_error(err?.stack || err);
       }
-
+      return false;
 
     }
 
