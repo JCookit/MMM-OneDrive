@@ -27,6 +27,7 @@ const { fetchToUint8Array, FetchHTTPError } = require("./fetchItem-node");
 // Canvas and Sharp backends for image resizing.
 const { createCanvas, loadImage } = require('canvas');
 const sharp = require('sharp');
+const { readFrames, writeFrame } = require('./src/resize/resize-worker');
 // ExifReader no longer needed here - canvas 3.x handles EXIF orientation automatically
 
 
@@ -1218,8 +1219,7 @@ const nodeHelperObject = {
         '--max-old-space-size=512',
         workerPath
       ], {
-        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-        serialization: 'advanced'
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc', 'pipe']
       });
     } catch (error) {
       this.resizeWorkerRestarting = false;
@@ -1246,8 +1246,25 @@ const nodeHelperObject = {
       }
     });
 
-    this.resizeWorker.on('message', (message) => {
-      this.handleResizeWorkerMessage(message);
+    spawnedWorker.on('message', (message) => {
+      if (this.resizeWorker === spawnedWorker) this.handleResizeWorkerMessage(message);
+    });
+
+    (async () => {
+      for await (const { metadata, buffer } of readFrames(spawnedWorker.stdio[4])) {
+        if (this.resizeWorker !== spawnedWorker) return;
+        this.handleResizeWorkerMessage({ ...metadata, buffer });
+      }
+    })().catch(error => {
+      if (this.resizeWorker !== spawnedWorker || this.shuttingDown) return;
+      console.error('[NodeHelper] Resize worker output pipe failed:', error);
+      this.restartResizeWorker('output_pipe_error');
+    });
+
+    spawnedWorker.stdin.on('error', error => {
+      if (this.resizeWorker !== spawnedWorker || this.shuttingDown) return;
+      console.error('[NodeHelper] Resize worker input pipe failed:', error);
+      this.restartResizeWorker('input_pipe_error');
     });
 
     this.resizeWorker.on('exit', (code, signal) => {
@@ -1297,6 +1314,16 @@ const nodeHelperObject = {
 
   handleResizeWorkerResponse: function(message) {
     const { requestId } = message;
+
+    if (message.type === 'RESIZE_ERROR' && requestId == null) {
+      console.error('[NodeHelper] Fatal resize worker error:', {
+        origin: message.origin,
+        error: message.error,
+        stack: message.stack,
+        telemetry: message.telemetry
+      });
+      return;
+    }
 
     if (!this.resizeRequests.has(requestId)) {
       console.warn(`[NodeHelper] Received resize response for unknown request ID: ${requestId}`);
@@ -1379,14 +1406,13 @@ const nodeHelperObject = {
         timeout
       });
 
-      try {
-        this.resizeWorker.send(message);
-      } catch (error) {
-        clearTimeout(timeout);
-        this.resizeRequests.delete(requestId);
-        this.resizeWorkerBusy = false;
-        reject(error);
-      }
+      const worker = this.resizeWorker;
+      const { imageBuffer, ...metadata } = message;
+      writeFrame(worker.stdin, metadata, imageBuffer).catch(error => {
+        if (this.resizeWorker !== worker || !this.resizeRequests.has(requestId)) return;
+        this.handleResizeWorkerResponse({ type: 'RESIZE_ERROR', requestId, error: error.message, stack: error.stack });
+        this.restartResizeWorker('input_write_error');
+      });
     });
   },
 
@@ -1427,7 +1453,14 @@ const nodeHelperObject = {
     const worker = this.resizeWorker;
     this.resizeWorker = null;
 
-    if (worker && !worker.killed) {
+    if (worker && worker.exitCode === null && worker.signalCode === null) {
+      const forceKill = setTimeout(() => {
+        if (worker.exitCode === null && worker.signalCode === null) {
+          console.warn(`[NodeHelper] Force killing resize worker PID ${worker.pid} after SIGTERM grace period`);
+          worker.kill('SIGKILL');
+        }
+      }, 1000);
+      worker.once('exit', () => clearTimeout(forceKill));
       try {
         worker.kill('SIGTERM');
       } catch (error) {

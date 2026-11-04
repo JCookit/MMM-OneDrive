@@ -1,28 +1,62 @@
-const sharp = require('sharp');
+const MAX_METADATA_BYTES = 64 * 1024;
+const MAX_IMAGE_BYTES = 128 * 1024 * 1024;
 
-function normalizeIpcBuffer(value) {
-  if (!value) {
-    return null;
+async function writeFrame(stream, metadata, buffer) {
+  const json = Buffer.from(JSON.stringify(metadata));
+  validateFrameLengths(json.length, buffer.length);
+  const header = Buffer.alloc(8);
+  header.writeUInt32BE(json.length);
+  header.writeUInt32BE(buffer.length, 4);
+  for (const part of [header, json, buffer]) {
+    await new Promise((resolve, reject) => {
+      stream.write(part, error => error ? reject(error) : resolve());
+    });
   }
-
-  if (Buffer.isBuffer(value)) {
-    return value;
-  }
-
-  if (value instanceof Uint8Array) {
-    return Buffer.from(value);
-  }
-
-  if (value?.type === 'Buffer' && Array.isArray(value.data)) {
-    return Buffer.from(value.data);
-  }
-
-  if (value?.data instanceof Uint8Array) {
-    return Buffer.from(value.data);
-  }
-
-  return null;
 }
+
+function validateFrameLengths(metadataLength, imageLength) {
+  if (!metadataLength || metadataLength > MAX_METADATA_BYTES ||
+      !imageLength || imageLength > MAX_IMAGE_BYTES) {
+    throw new Error(`Invalid resize frame lengths: ${metadataLength}, ${imageLength}`);
+  }
+}
+
+async function* readFrames(stream) {
+  let header = Buffer.alloc(8);
+  let metadata;
+  let image;
+  let offset = 0;
+  for await (const chunk of stream) {
+    let cursor = 0;
+    while (cursor < chunk.length) {
+      const target = image || metadata || header;
+      const count = chunk.copy(target, offset, cursor);
+      cursor += count;
+      offset += count;
+      if (offset < target.length) continue;
+      offset = 0;
+      if (image) {
+        yield { metadata: JSON.parse(metadata.toString('utf8')), buffer: image };
+        metadata = image = undefined;
+        header = Buffer.alloc(8);
+      } else if (metadata) {
+        image = Buffer.allocUnsafe(header.readUInt32BE(4));
+      } else {
+        const metadataLength = header.readUInt32BE();
+        validateFrameLengths(metadataLength, header.readUInt32BE(4));
+        metadata = Buffer.allocUnsafe(metadataLength);
+      }
+    }
+  }
+  if (offset || metadata) throw new Error('Incomplete resize frame');
+}
+
+module.exports = { readFrames, writeFrame };
+if (require.main !== module) return;
+
+const sharp = require('sharp');
+const { Socket } = require('node:net');
+const output = new Socket({ fd: 4, readable: false, writable: true });
 
 function formatMemoryUsage() {
   const usage = process.memoryUsage();
@@ -131,58 +165,36 @@ async function resizeImageWithSharp(imageBuffer, photo, config) {
   };
 }
 
-process.on('message', async (message) => {
-  if (!message || typeof message !== 'object') {
-    return;
-  }
-
-  if (message.type === 'SHUTDOWN') {
-    process.exit(0);
-    return;
-  }
-
-  if (message.type !== 'RESIZE_IMAGE') {
-    return;
-  }
-
-  const { requestId, photo, config } = message;
-
-  try {
-    const imageBuffer = normalizeIpcBuffer(message.imageBuffer);
-    if (!imageBuffer) {
-      throw new Error('No image buffer supplied to resize worker');
-    }
-
-    const result = await resizeImageWithSharp(imageBuffer, photo, config || {});
-    process.send?.({
-      type: 'RESIZE_RESULT',
-      requestId,
-      buffer: result.buffer,
-      outputWidth: result.outputWidth,
-      outputHeight: result.outputHeight,
-      telemetry: result.telemetry
-    });
-  } catch (error) {
-    process.send?.({
-      type: 'RESIZE_ERROR',
-      requestId,
-      error: error?.message || String(error),
-      stack: error?.stack || null,
-      telemetry: {
-        pid: process.pid,
-        memory: formatMemoryUsage()
-      }
-    });
-  }
+process.on('message', message => {
+  if (message?.type === 'SHUTDOWN') process.exit(0);
 });
+
+async function run() {
+  for await (const { metadata: { requestId, photo, config }, buffer } of readFrames(process.stdin)) {
+    try {
+      const { buffer: resized, ...result } = await resizeImageWithSharp(buffer, photo, config || {});
+      await writeFrame(output, { type: 'RESIZE_RESULT', requestId, ...result }, resized);
+    } catch (error) {
+      process.send?.({
+        type: 'RESIZE_ERROR',
+        requestId,
+        error: error?.message || String(error),
+        stack: error?.stack || null
+      });
+    }
+  }
+}
 
 process.on('uncaughtException', (error) => {
   process.send?.({
     type: 'RESIZE_ERROR',
+    origin: 'uncaughtException',
     error: error?.message || String(error),
     stack: error?.stack || null,
     telemetry: {
       pid: process.pid,
+      nodeVersion: process.version,
+      sharpVersions: sharp.versions,
       memory: formatMemoryUsage()
     }
   });
@@ -192,10 +204,13 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (error) => {
   process.send?.({
     type: 'RESIZE_ERROR',
+    origin: 'unhandledRejection',
     error: error?.message || String(error),
     stack: error?.stack || null,
     telemetry: {
       pid: process.pid,
+      nodeVersion: process.version,
+      sharpVersions: sharp.versions,
       memory: formatMemoryUsage()
     }
   });
@@ -209,3 +224,5 @@ process.send?.({
     memory: formatMemoryUsage()
   }
 });
+
+run();
